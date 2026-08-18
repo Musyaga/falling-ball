@@ -1350,6 +1350,30 @@
     }
   }
 
+  function windFlowEnvelope(e) {
+    if (!e || e.phase !== "active") {
+      return { amount: 0, enter: 0, exit: 0 };
+    }
+
+    const enterDuration = 0.72;
+    const exitDuration = 0.82;
+
+    const enter = clamp(e.timer / enterDuration, 0, 1);
+    const timeLeft = Math.max(0, e.activeDuration - e.timer);
+    const exit = clamp(timeLeft / exitDuration, 0, 1);
+
+    // Smoothstep on both sides prevents a sudden start/stop.
+    const enterSmooth = enter * enter * (3 - 2 * enter);
+    const exitSmooth = exit * exit * (3 - 2 * exit);
+    const amount = Math.min(enterSmooth, exitSmooth);
+
+    return {
+      amount,
+      enter: enterSmooth,
+      exit: exitSmooth
+    };
+  }
+
   function applyWindToPlayer(dt) {
     const e = STATE.windEvent;
 
@@ -1371,12 +1395,13 @@
       return;
     }
 
-    STATE.windVisual = 1;
+    const flow = windFlowEnvelope(e);
+    STATE.windVisual = flow.amount;
 
-    // Full-screen wind: constant direction for the entire event.
-    // A tiny pulse changes strength only; direction can never flip.
+    // Wind now physically arrives from one side, builds up smoothly,
+    // then fades while travelling out through the opposite side.
     const pulse = 0.94 + 0.06 * Math.sin(STATE.time * 3.2);
-    const pushSpeed = e.strength * pulse * 0.34;
+    const pushSpeed = e.strength * pulse * 0.34 * flow.amount;
 
     PLAYER.targetX += e.dir * pushSpeed * dt;
     PLAYER.targetX = clamp(PLAYER.targetX, PLAYER.radius, W - PLAYER.radius);
@@ -1384,7 +1409,7 @@
     PLAYER.windVX = e.dir * pushSpeed;
     PLAYER.windOffset = 0;
 
-    AudioSys.setWind(1);
+    AudioSys.setWind(flow.amount);
   }
 
   // ============================================================
@@ -1437,6 +1462,8 @@
     PLAYER.alive = true;
     PLAYER.windOffset = 0;
     PLAYER.windVX = 0;
+    PLAYER.visualVX = 0;
+    PLAYER.visualTilt = 0;
     PLAYER.squash = 0;
     PLAYER.stretch = 0;
     PLAYER.lastBouncePlatformId = null;
@@ -1758,7 +1785,9 @@
               vx: (i - (pieceCount - 1) / 2) * 28,
               vy: -40 - (i % 2) * 22,
               rot: 0,
-              vr: (i - 2) * 1.8
+              vr: (i - 2) * 1.8,
+              alpha: 1,
+              fade: 0.82 + i * 0.05
             });
           }
 
@@ -1772,7 +1801,11 @@
           q.x += q.vx * dt;
           q.y += q.vy * dt;
           q.vy += 520 * dt;
+          q.vx *= Math.max(0, 1 - 1.1 * dt);
           q.rot += q.vr * dt;
+
+          // Fade away gently like dusty fragments.
+          q.alpha = Math.max(0, q.alpha - q.fade * dt);
         }
       }
     }
@@ -1780,7 +1813,7 @@
     STATE.platforms = STATE.platforms.filter(p => {
       if (!p.broken) return p.y + p.h > -60;
       if (!p.breakPieces || !p.breakPieces.length) return false;
-      return p.breakPieces.some(q => q.y < H + 90);
+      return p.breakPieces.some(q => q.y < H + 90 && q.alpha > 0.03);
     });
 
     updateWindZones(dt);
@@ -1809,11 +1842,21 @@
 
     applyWindToPlayer(dt);
 
+    const previousXBeforeMove = PLAYER.x;
+
     PLAYER.x = clamp(
       PLAYER.targetX,
       PLAYER.radius,
       W - PLAYER.radius
     );
+
+    // Smooth visual velocity: gameplay remains direct and responsive,
+    // but the character body reacts with believable inertia.
+    const rawVX = (PLAYER.x - previousXBeforeMove) / Math.max(dt, 0.0001);
+    PLAYER.visualVX += (rawVX - PLAYER.visualVX) * Math.min(1, 13 * dt);
+
+    const targetTilt = clamp(PLAYER.visualVX / 1200, -1, 1) * 0.14;
+    PLAYER.visualTilt += (targetTilt - PLAYER.visualTilt) * Math.min(1, 10 * dt);
 
     PLAYER.vy += PLAYER.gravity * dt;
     PLAYER.vy = Math.min(PLAYER.vy, PLAYER.maxFallSpeed);
@@ -1981,8 +2024,8 @@
         p.bounceVel += clamp(incomingSpeed / 300, 0.9, 3.0);
         p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 4.6;
 
-        PLAYER.squash = clamp(incomingSpeed / 760, 0.12, 0.48);
-        PLAYER.stretch = 0;
+        PLAYER.squash = clamp(incomingSpeed / 820, 0.14, 0.42);
+        PLAYER.stretch = -0.04;
         STATE.impactShake = Math.max(
           STATE.impactShake,
           0.8 + incomingSpeed * 0.0018
@@ -2409,15 +2452,26 @@
       if (!p.broken || p.type !== TYPE.FRAGILE || !p.breakPieces) continue;
 
       for (const q of p.breakPieces) {
+        if (q.alpha <= 0.02) continue;
+
         ctx.save();
+        ctx.globalAlpha = q.alpha;
         ctx.translate(q.x + q.w * 0.5, q.y + q.h * 0.5);
         ctx.rotate(q.rot);
         ctx.fillStyle = mixedTheme().fragile;
-        ctx.strokeStyle = "#2f3833";
+        ctx.strokeStyle = "rgba(47,56,51,.75)";
         ctx.lineWidth = 1.8;
         roundRectPath(-q.w * 0.5, -q.h * 0.5, q.w, q.h, 3);
         ctx.fill();
         ctx.stroke();
+
+        // Tiny dusty softness under the piece as it disappears.
+        ctx.globalAlpha = q.alpha * 0.18;
+        ctx.fillStyle = "#8e7b66";
+        ctx.beginPath();
+        ctx.ellipse(0, q.h * 0.35, q.w * 0.42, q.h * 0.18, 0, 0, TAU);
+        ctx.fill();
+
         ctx.restore();
       }
     }
@@ -2575,8 +2629,10 @@
       return;
     }
 
-    // Active phase covers the WHOLE SCREEN for ~3.5–4 seconds.
-    if (STATE.windVisual <= 0) {
+    // Active wind enters from the incoming side instead of appearing
+    // everywhere at once, then travels out through the opposite side.
+    const flow = windFlowEnvelope(e);
+    if (flow.amount <= 0.001) {
       ctx.restore();
       return;
     }
@@ -2584,9 +2640,26 @@
     const dir = e.dir;
     const t = STATE.time;
 
-    // No full-screen blue tint. Wind is communicated only with moving
-    // streaks, gust lines and paper particles, so no blue cast can remain.
-    ctx.globalAlpha = 1;
+    // Intro: reveal progressively from the source side.
+    // dir > 0 means wind travels left -> right.
+    const reveal = Math.max(0.03, flow.enter);
+    const revealW = W * reveal;
+
+    ctx.beginPath();
+    if (dir > 0) {
+      ctx.rect(0, 0, revealW, H);
+    } else {
+      ctx.rect(W - revealW, 0, revealW, H);
+    }
+    ctx.clip();
+
+    // Outro: carry the entire gust field out through the destination side.
+    const outroProgress = 1 - flow.exit;
+    const exitOffset = dir * W * 0.34 * outroProgress;
+    ctx.translate(exitOffset, 0);
+
+    // Gentle global fade only near the end.
+    ctx.globalAlpha = Math.max(0, flow.amount);
     ctx.strokeStyle = "rgba(108,136,145,.50)";
     ctx.fillStyle = "rgba(108,136,145,.38)";
     ctx.lineCap = "round";
@@ -2597,7 +2670,10 @@
       const speed = 115 + (row % 5) * 17;
       const travel = W + 220;
       const base = (t * speed + row * 79) % travel;
-      const x = dir > 0 ? base - 110 : W - (base - 110);
+      const sourceLead = (1 - flow.enter) * 180;
+      const x = dir > 0
+        ? base - 110 - sourceLead
+        : W - (base - 110) + sourceLead;
       const len = 58 + (row % 4) * 16;
 
       ctx.lineWidth = 2 + (row % 3) * 0.45;
@@ -2628,7 +2704,10 @@
       const speed = 92 + i * 13;
       const travel = W + 260;
       const base = (t * speed + i * 131) % travel;
-      const x = dir > 0 ? base - 130 : W - (base - 130);
+      const sourceLead = (1 - flow.enter) * 210;
+      const x = dir > 0
+        ? base - 130 - sourceLead
+        : W - (base - 130) + sourceLead;
       const y = 90 + ((i * 101 + t * 18) % (H - 180));
       const len = 80 + (i % 3) * 24;
 
@@ -2647,7 +2726,10 @@
       const speed = 72 + i * 9;
       const travel = W + 160;
       const base = (t * speed + i * 113) % travel;
-      const x = dir > 0 ? base - 80 : W - (base - 80);
+      const sourceLead = (1 - flow.enter) * 160;
+      const x = dir > 0
+        ? base - 80 - sourceLead
+        : W - (base - 80) + sourceLead;
       const y = 50 + ((i * 97 + t * 22) % (H - 100));
 
       ctx.save();
@@ -2659,7 +2741,7 @@
     }
 
     // Small persistent direction marker while active.
-    ctx.globalAlpha = 0.72;
+    ctx.globalAlpha = 0.72 * flow.amount;
     ctx.fillStyle = "#b74743";
     ctx.textAlign = dir > 0 ? "left" : "right";
     ctx.textBaseline = "middle";
@@ -2745,10 +2827,19 @@
     const horizontalIntent = clamp(moveIntent * 0.65 + aimIntent * 0.75, -1, 1);
 
     const look = horizontalIntent * 7.4;
-    const tilt = horizontalIntent * 0.09;
+    const tilt = PLAYER.visualTilt + horizontalIntent * 0.035;
 
-    const sx = 1 + PLAYER.squash * 0.18 - PLAYER.stretch * 0.08;
-    const sy = 1 - PLAYER.squash * 0.16 + PLAYER.stretch * 0.14;
+    const horizontalDeform = clamp(Math.abs(PLAYER.visualVX) / 1700, 0, 0.10);
+    const sx =
+      1 +
+      PLAYER.squash * 0.18 -
+      PLAYER.stretch * 0.08 +
+      horizontalDeform * 0.45;
+    const sy =
+      1 -
+      PLAYER.squash * 0.16 +
+      PLAYER.stretch * 0.14 -
+      horizontalDeform * 0.32;
 
     // Softer and more readable motion streaks.
     if (STATE.mode === MODE.PLAYING) {
@@ -2823,12 +2914,6 @@
     ctx.arc(-2, -12, 2.6, 0, TAU);
     ctx.fill();
 
-    // Gentle lower tint
-    ctx.fillStyle = "rgba(30,40,36,.07)";
-    ctx.beginPath();
-    ctx.ellipse(0, 8, PLAYER.radius * 0.62, PLAYER.radius * 0.32, 0, 0, TAU);
-    ctx.fill();
-
     const fallingFast = PLAYER.vy > 390;
     const fallingVeryFast = PLAYER.vy > 560;
     const fallingExtreme = PLAYER.vy > 760;
@@ -2898,9 +2983,9 @@
     ctx.stroke();
 
     // Mouth
-    ctx.strokeStyle = faceColor;
-    ctx.fillStyle = faceColor;
-    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = "rgba(29,35,32,.82)";
+    ctx.fillStyle = "transparent";
+    ctx.lineWidth = 1.65;
 
     if (fallingFast) {
       ctx.beginPath();
@@ -3089,8 +3174,8 @@
     }
 
     drawBackground();
-    drawWindZones();
     drawPlatforms();
+    drawWindZones();
     drawParticles();
     drawDeathPieces();
     drawPlayer();
