@@ -600,18 +600,18 @@
     controls: {
       // Desktop keeps the firmer flick.
       // Mobile is intentionally more forgiving because thumb travel is shorter.
-      flickThreshold: IS_MOBILE ? 560 : 1050,
-      flickWindowMs: IS_MOBILE ? 220 : 135,
-      flickMinTravel: IS_MOBILE ? 14 : 24,
-      flickCooldownMs: IS_MOBILE ? 150 : 180,
+      flickThreshold: IS_MOBILE ? 500 : 1050,
+      flickWindowMs: IS_MOBILE ? 240 : 135,
+      flickMinTravel: IS_MOBILE ? 12 : 24,
+      flickCooldownMs: IS_MOBILE ? 135 : 180,
 
       // Slight mobile-only forgiveness around enemies.
-      flickEnemyRangeMul: IS_MOBILE ? 5.4 : 4.0,
+      flickEnemyRangeMul: IS_MOBILE ? 5.8 : 4.0,
 
       // Direct short-swipe fallback for touchscreens.
-      mobileSwipeTravel: 15,
-      mobileSwipeMaxMs: 250,
-      mobileSwipeVelocity: 420
+      mobileSwipeTravel: 12,
+      mobileSwipeMaxMs: 280,
+      mobileSwipeVelocity: 320
     }
   };
 
@@ -2758,8 +2758,8 @@
 
     const mobileQuickFlick =
       IS_MOBILE &&
-      shortDeltaY >= 13 &&
-      shortVelocity >= 760;
+      shortDeltaY >= 10 &&
+      shortVelocity >= 560;
 
     if (
       cooldownReady &&
@@ -4288,8 +4288,15 @@
     ctx.globalAlpha = 0.68;
     ctx.fillText("BREAK FRAGILE • HIT CREATURES", W * 0.5, fy + 63);
 
-    ctx.globalAlpha = 0.72;
-    ctx.fillText("TAP TO START", W * 0.5, fy + 88);
+    if (IS_MOBILE) {
+      ctx.globalAlpha = 0.70;
+      ctx.fillText("OR TAP THE STOMP BUTTON", W * 0.5, fy + 80);
+      ctx.globalAlpha = 0.72;
+      ctx.fillText("TAP TO START", W * 0.5, fy + 100);
+    } else {
+      ctx.globalAlpha = 0.72;
+      ctx.fillText("TAP TO START", W * 0.5, fy + 88);
+    }
 
     ctx.restore();
   }
@@ -4334,7 +4341,7 @@
 
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.globalAlpha = a * 0.58;
-    ctx.fillText("↓  FAST SWIPE", x, y + 52);
+    ctx.fillText(IS_MOBILE ? "↓ FAST SWIPE OR TAP STOMP" : "↓ FAST SWIPE", x, y + 52);
 
     ctx.restore();
   }
@@ -4395,6 +4402,7 @@
     drawPlayer();
     drawTutorial();
     drawFlickHint();
+    drawStompButton();
     drawPopups();
 
     // Last layer: platforms visually pass behind the top spikes.
@@ -4477,13 +4485,114 @@
   // ============================================================
   // 15) INPUT — TOUCH / MOUSE 1:1
   // ============================================================
+
+  function getStompButtonRect() {
+    const w = IS_MOBILE ? 88 : 0;
+    const h = IS_MOBILE ? 88 : 0;
+    const x = W - w - 16;
+    const y = H - h - 24;
+    return { x, y, w, h, cx: x + w * 0.5, cy: y + h * 0.5 };
+  }
+
+  function stompButtonHit(gameX, gameY) {
+    if (!IS_MOBILE || STATE.mode !== MODE.PLAYING) return false;
+    const r = getStompButtonRect();
+    const dx = gameX - r.cx;
+    const dy = gameY - r.cy;
+    const rad = Math.min(r.w, r.h) * 0.48;
+    return dx * dx + dy * dy <= rad * rad;
+  }
+
+  function drawStompButton() {
+    if (!IS_MOBILE || STATE.mode !== MODE.PLAYING) return;
+
+    const r = getStompButtonRect();
+    const nearEnemy = !!findEnemyInFlickRange();
+    const pulse = 0.88 + Math.sin(STATE.time * 6.5) * 0.08;
+    const scale = nearEnemy ? 1.04 + Math.sin(STATE.time * 9) * 0.03 : 1;
+    const a = nearEnemy ? 0.96 : 0.84;
+
+    ctx.save();
+    ctx.translate(r.cx, r.cy);
+    ctx.scale(scale, scale);
+
+    // outer ring
+    ctx.globalAlpha = a * 0.28;
+    ctx.fillStyle = nearEnemy ? "#ffd870" : "#ffffff";
+    ctx.beginPath();
+    ctx.arc(0, 0, r.w * 0.50 * pulse, 0, TAU);
+    ctx.fill();
+
+    // body
+    ctx.globalAlpha = a;
+    ctx.fillStyle = nearEnemy ? "#fff1b8" : "#f6f6f6";
+    ctx.strokeStyle = "#2a2e34";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(0, 0, r.w * 0.39, 0, TAU);
+    ctx.fill();
+    ctx.stroke();
+
+    // down arrow
+    ctx.strokeStyle = "#d64545";
+    ctx.lineWidth = 5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(0, -16);
+    ctx.lineTo(0, 10);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(0, 10);
+    ctx.lineTo(-11, -1);
+    ctx.moveTo(0, 10);
+    ctx.lineTo(11, -1);
+    ctx.stroke();
+
+    // label
+    ctx.fillStyle = "#2a2e34";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "900 11px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("STOMP", 0, 24);
+
+    ctx.restore();
+  }
+
   function pointerToGameX(clientX) {
     const rect = canvas.getBoundingClientRect();
     return (clientX - rect.left) * (W / rect.width);
   }
 
+  function pointerToGameY(clientY) {
+    const rect = canvas.getBoundingClientRect();
+    return (clientY - rect.top) * (H / rect.height);
+  }
+
   canvas.addEventListener("pointerdown", e => {
     AudioSys.init();
+
+    const gameX = pointerToGameX(e.clientX);
+    const gameY = pointerToGameY(e.clientY);
+
+    // Mobile assist: a dedicated stomp button for reliable activation.
+    // This can be tapped even with a second thumb while the first thumb
+    // is dragging the player horizontally.
+    if (stompButtonHit(gameX, gameY)) {
+      AudioSys.resume().then(() => {
+        if (
+          STATE.mode === MODE.PLAYING &&
+          AudioSys.ctx &&
+          AudioSys.ctx.state === "running" &&
+          !MusicSys.running
+        ) {
+          MusicSys.start();
+        }
+      });
+
+      triggerDownFlick();
+      e.preventDefault?.();
+      return;
+    }
 
     if (STATE.mode === MODE.TUTORIAL) {
       beginActualRun();
