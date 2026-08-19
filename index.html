@@ -532,7 +532,7 @@
 
     // Wind event
     winds: [],
-    nextWindSpawnScore: 420,
+    nextWindSpawnScore: 340,
     windSerial: 1,
     windEvent: null,
 
@@ -619,7 +619,11 @@
       mobileSwipeTravel: 13,
       mobileSwipeMaxMs: 320,
       mobileSwipeVelocity: 260,
-      mobileAccumTravel: 16
+      mobileAccumTravel: 16,
+
+      // Mobile accessibility: a clean short tap also triggers stomp.
+      mobileTapMaxMs: 230,
+      mobileTapMaxMove: 12
     }
   };
 
@@ -637,6 +641,9 @@
     flickStartY: 0,
     flickStartTime: 0,
     flickTriggeredForPointer: false,
+    pointerStartClientX: 0,
+    pointerStartClientY: 0,
+    suppressTapStomp: false,
     flickAccumDown: 0,
     flickLastY: 0,
     flickSmoothedVY: 0,
@@ -1601,11 +1608,10 @@
     if (STATE.windEvent) return;
     if (STATE.score < STATE.nextWindSpawnScore) return;
 
-    // Rare event: keep a generous gap between wind sequences.
-    STATE.nextWindSpawnScore = STATE.score + 720 + Math.random() * 720;
-
-    // Do not trigger every time the score threshold is reached.
-    if (Math.random() > 0.68) return;
+    // Wind cadence: regular enough to be part of the run, but not spammy.
+    // Once the score threshold is reached, the event WILL happen instead of
+    // failing a second random roll and disappearing for another long interval.
+    STATE.nextWindSpawnScore = STATE.score + 430 + Math.random() * 390;
 
     const dir = Math.random() < 0.5 ? -1 : 1;
 
@@ -1779,7 +1785,7 @@
     STATE.windEvent = null;
     PLAYER.windVX = 0;
     PLAYER.windOffset = 0;
-    STATE.nextWindSpawnScore = 420 + Math.random() * 260;
+    STATE.nextWindSpawnScore = 300 + Math.random() * 220;
     STATE.windSerial = 1;
     STATE.deathTimer = 0;
     STATE.deathPhase = 0;
@@ -4373,7 +4379,11 @@
 
     ctx.textAlign = "center";
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
-    ctx.fillText("FLICK = BREAK + STOMP", panelX + panelW * 0.5, panelY + 28);
+    ctx.fillText(
+      IS_MOBILE ? "TAP = BREAK + STOMP" : "FLICK = BREAK + STOMP",
+      panelX + panelW * 0.5,
+      panelY + 28
+    );
 
     const cx = panelX + panelW * 0.5;
     const fragileY = panelY + 92;
@@ -4557,7 +4567,7 @@
       ctx.textAlign = "left";
       ctx.font = "900 8px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
       ctx.fillStyle = T.text;
-      ctx.fillText("AŞAĞI ÇEK", fingerX - 20, panelY + 116);
+      ctx.fillText(IS_MOBILE ? "TEK DOKUN" : "AŞAĞI ÇEK", fingerX - 20, panelY + 116);
     }
 
     // Enemy shatter particles after impact.
@@ -4706,7 +4716,7 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "900 11px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
-    ctx.fillText("AŞAĞI ÇEK!", bx, by - 1);
+    ctx.fillText(IS_MOBILE ? "DOKUN!" : "AŞAĞI ÇEK!", bx, by - 1);
 
     // No standalone down-arrow icon here; text + tutorial animation are enough.
     ctx.restore();
@@ -4741,7 +4751,7 @@
 
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.globalAlpha = a * 0.58;
-    ctx.fillText(IS_MOBILE ? "QUICK DOWN SWIPE" : "USE STOMP", x, y + 38);
+    ctx.fillText(IS_MOBILE ? "TAP TO STOMP" : "USE STOMP", x, y + 38);
 
     ctx.restore();
   }
@@ -4896,7 +4906,9 @@
   canvas.addEventListener("pointerdown", e => {
     AudioSys.init();
 
-    if (STATE.mode === MODE.TUTORIAL) {
+    const startedInTutorial = STATE.mode === MODE.TUTORIAL;
+
+    if (startedInTutorial) {
       beginActualRun();
     }
 
@@ -4924,6 +4936,9 @@
     INPUT.flickStartY = e.clientY;
     INPUT.flickStartTime = flickNow;
     INPUT.flickTriggeredForPointer = false;
+    INPUT.pointerStartClientX = e.clientX;
+    INPUT.pointerStartClientY = e.clientY;
+    INPUT.suppressTapStomp = startedInTutorial;
     INPUT.flickAccumDown = 0;
     INPUT.flickLastY = e.clientY;
     INPUT.flickSmoothedVY = 0;
@@ -4959,9 +4974,34 @@
   function endPointer(e) {
     if (e.pointerId !== INPUT.pointerId) return;
 
+    const now = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
+    const dtMs = Math.max(1, now - INPUT.flickStartTime);
+
+    // MOBILE ONLY — a clean single tap is a stomp.
+    // A drag is not: total finger movement must stay inside a small radius.
+    if (
+      IS_MOBILE &&
+      STATE.mode === MODE.PLAYING &&
+      !INPUT.suppressTapStomp &&
+      !INPUT.flickTriggeredForPointer
+    ) {
+      const tapDx = e.clientX - INPUT.pointerStartClientX;
+      const tapDy = e.clientY - INPUT.pointerStartClientY;
+      const tapMove = Math.hypot(tapDx, tapDy);
+
+      if (
+        dtMs <= CONFIG.controls.mobileTapMaxMs &&
+        tapMove <= CONFIG.controls.mobileTapMaxMove &&
+        now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs
+      ) {
+        INPUT.flickTriggeredForPointer = true;
+        INPUT.lastFlickAt = now;
+        triggerDownFlick();
+      }
+    }
+
+    // Existing mobile downward-swipe fallback remains available.
     if (IS_MOBILE && !INPUT.flickTriggeredForPointer) {
-      const now = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
-      const dtMs = Math.max(1, now - INPUT.flickStartTime);
       const dy = e.clientY - INPUT.flickStartY;
 
       if (
@@ -4980,6 +5020,7 @@
     INPUT.lastPointerX = 0;
     INPUT.flickSamples.length = 0;
     INPUT.flickTriggeredForPointer = false;
+    INPUT.suppressTapStomp = false;
     INPUT.flickAccumDown = 0;
     INPUT.flickSmoothedVY = 0;
   }
