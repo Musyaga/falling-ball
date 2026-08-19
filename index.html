@@ -3329,334 +3329,320 @@
         : 0;
 
       const r = enemy.radius;
+      const phase = enemy.age * 7.2 + enemy.id * 0.77;
+      const bob = dying ? 0 : Math.sin(phase) * 0.9;
+      const lean = dying ? 0 : enemy.patrolDir * Math.sin(phase * 0.55) * 0.045;
 
-      // Keep body visually anchored to the platform surface.
-      const walkPhase = enemy.age * 8.2;
-      const walkBob = dying ? 0 : Math.sin(walkPhase) * 1.15;
-      const walkLean = dying ? 0 : enemy.patrolDir * Math.sin(walkPhase * 0.5) * 0.035;
+      // Green slime alien families.
+      const family = enemy.id % 5;
+      const body = ["#69a94f", "#78b85d", "#5d9f47", "#7caf55", "#67a85c"][family];
+      const bodyDark = ["#3d7036", "#4a7d3c", "#356a31", "#4c7437", "#3f7650"][family];
+      const slime = ["#8fd56f", "#9be57a", "#79c963", "#a0d96d", "#78c87a"][family];
+      const highlight = ["#b9ed9b", "#c9f4ac", "#a9e78f", "#d0f0a4", "#a6e5ac"][family];
+      const outline = "#30402d";
 
       ctx.save();
-      ctx.translate(enemy.x, enemy.y + walkBob);
-      ctx.rotate(walkLean);
+      ctx.translate(enemy.x, enemy.y + bob);
+      ctx.rotate(lean);
 
-      // ------------------------------------------------------
-      // Death: creature SHATTERS into chunks and dust instead of
-      // flattening/burning. All fragments remain anchored relative
-      // to the moving host platform because they are drawn from the
-      // current platform-following enemy origin each frame.
-      // ------------------------------------------------------
+      // Body should disintegrate into dust instead of visibly being squashed.
+      const bodyFade = dying ? Math.max(0, 1 - deathT * 6.0) : 1;
+      const dustT = dying ? clamp((deathT - 0.02) / 0.98, 0, 1) : 0;
+
       if (dying) {
-        // Small impact burst
-        if (deathT < 0.34) {
-          const ringT = deathT / 0.34;
-          ctx.globalAlpha = (1 - ringT) * 0.38;
-          ctx.strokeStyle = "#d9c97a";
-          ctx.lineWidth = 2.2;
+        ctx.globalAlpha = bodyFade;
+      }
+
+      // Ground shadow
+      ctx.globalAlpha *= 0.16;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.92, r * 0.62, r * 0.18, 0, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = bodyFade;
+
+      // Alien antennae / feelers
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+
+      const antennaCount = family === 2 ? 5 : family === 4 ? 6 : 4;
+      for (let i = 0; i < antennaCount; i++) {
+        const a = -2.45 + (i / Math.max(1, antennaCount - 1)) * 1.75;
+        const sx = Math.cos(a) * r * 0.55;
+        const sy = Math.sin(a) * r * 0.52;
+        const ex = Math.cos(a) * r * (1.0 + (i % 2) * 0.12) + Math.sin(phase + i) * 1.2;
+        const ey = Math.sin(a) * r * (0.95 + (i % 3) * 0.05) - r * 0.08;
+
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.quadraticCurveTo(
+          (sx + ex) * 0.52 + Math.sin(i + phase) * 2.0,
+          (sy + ey) * 0.5 - 3,
+          ex,
+          ey
+        );
+        ctx.stroke();
+
+        ctx.fillStyle = slime;
+        ctx.beginPath();
+        ctx.arc(ex, ey, 2.0 + (i % 2) * 0.6, 0, TAU);
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      // Side tentacles
+      const tentacleSwing = Math.sin(phase) * 2.1;
+      ctx.strokeStyle = bodyDark;
+      ctx.lineWidth = 2.4;
+
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.68, r * 0.02);
+      ctx.quadraticCurveTo(
+        -r * 1.0,
+        r * 0.05 + tentacleSwing,
+        -r * 1.12,
+        r * 0.42 + tentacleSwing * 0.4
+      );
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(r * 0.68, r * 0.02);
+      ctx.quadraticCurveTo(
+        r * 1.0,
+        r * 0.05 - tentacleSwing,
+        r * 1.12,
+        r * 0.42 - tentacleSwing * 0.4
+      );
+      ctx.stroke();
+
+      // Main gelatinous alien body
+      ctx.fillStyle = body;
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = 2.4;
+      ctx.beginPath();
+
+      if (family === 1) {
+        ctx.moveTo(-r * 0.82, r * 0.12);
+        ctx.bezierCurveTo(-r * 0.88, -r * 0.55, -r * 0.44, -r * 0.88, 0, -r * 0.84);
+        ctx.bezierCurveTo(r * 0.58, -r * 0.90, r * 0.88, -r * 0.40, r * 0.82, r * 0.16);
+        ctx.bezierCurveTo(r * 0.75, r * 0.70, r * 0.32, r * 0.76, 0, r * 0.70);
+        ctx.bezierCurveTo(-r * 0.35, r * 0.78, -r * 0.78, r * 0.62, -r * 0.82, r * 0.12);
+      } else if (family === 3) {
+        ctx.ellipse(0, -r * 0.02, r * 0.78, r * 0.96, 0, 0, TAU);
+      } else {
+        ctx.ellipse(0, 0, r * 0.92, r * 0.82, 0, 0, TAU);
+      }
+
+      ctx.fill();
+      ctx.stroke();
+
+      // Slime surface highlights
+      ctx.globalAlpha *= 0.34;
+      ctx.fillStyle = highlight;
+      ctx.beginPath();
+      ctx.ellipse(-r * 0.30, -r * 0.38, r * 0.24, r * 0.12, -0.35, 0, TAU);
+      ctx.fill();
+      ctx.globalAlpha = bodyFade;
+
+      // Bubbles / slime pustules
+      const bubbleCount = 5 + (family % 3);
+      for (let i = 0; i < bubbleCount; i++) {
+        const bx = Math.cos(i * 1.27 + enemy.id) * r * (0.20 + (i % 3) * 0.16);
+        const by = Math.sin(i * 1.47 + enemy.id * 0.4) * r * 0.25 + ((i % 2) ? 2 : -2);
+        const br = 1.8 + (i % 3) * 1.0;
+
+        ctx.fillStyle = bodyDark;
+        ctx.beginPath();
+        ctx.arc(bx, by, br, 0, TAU);
+        ctx.fill();
+
+        ctx.fillStyle = highlight;
+        ctx.globalAlpha *= 0.48;
+        ctx.beginPath();
+        ctx.arc(bx - br * 0.25, by - br * 0.25, br * 0.32, 0, TAU);
+        ctx.fill();
+        ctx.globalAlpha = bodyFade;
+      }
+
+      // Eyes - asymmetrical alien look
+      const mainEyeX = family === 4 ? -r * 0.12 : r * 0.04;
+      const mainEyeY = -r * 0.08;
+
+      ctx.fillStyle = "#f7f5dc";
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = 1.7;
+      ctx.beginPath();
+      ctx.ellipse(mainEyeX, mainEyeY, r * 0.34, r * 0.29, 0, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      const lookX = Math.sin(enemy.age * 1.3 + enemy.id) * r * 0.08;
+      const lookY = Math.cos(enemy.age * 0.8 + enemy.id) * r * 0.05;
+
+      ctx.fillStyle = "#182318";
+      ctx.beginPath();
+      ctx.arc(mainEyeX + lookX, mainEyeY + lookY, r * 0.105, 0, TAU);
+      ctx.fill();
+
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(mainEyeX + lookX - r * 0.03, mainEyeY + lookY - r * 0.035, r * 0.025, 0, TAU);
+      ctx.fill();
+
+      const extraEyes = family === 0 ? 2 : family === 2 ? 3 : 1;
+      for (let i = 0; i < extraEyes; i++) {
+        const ex = (-0.42 + i * 0.34) * r;
+        const ey = (-0.28 + (i % 2) * 0.14) * r;
+        const er = r * (0.085 + (i % 2) * 0.02);
+
+        ctx.fillStyle = "#f7f5dc";
+        ctx.beginPath();
+        ctx.arc(ex, ey, er, 0, TAU);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = "#182318";
+        ctx.beginPath();
+        ctx.arc(ex + er * 0.12, ey + er * 0.06, er * 0.40, 0, TAU);
+        ctx.fill();
+      }
+
+      // Angry brow
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(mainEyeX - r * 0.28, mainEyeY - r * 0.25);
+      ctx.quadraticCurveTo(
+        mainEyeX,
+        mainEyeY - r * 0.34,
+        mainEyeX + r * 0.25,
+        mainEyeY - r * 0.22
+      );
+      ctx.stroke();
+
+      // Alien mouth
+      ctx.fillStyle = "#263226";
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.ellipse(0, r * 0.26, r * 0.28, r * 0.18, 0, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      // Small uneven teeth
+      ctx.fillStyle = "#e9edcf";
+      for (let i = 0; i < 4; i++) {
+        const tx = (-0.20 + i * 0.13) * r;
+        ctx.beginPath();
+        ctx.moveTo(tx, r * 0.17);
+        ctx.lineTo(tx + r * 0.045, r * 0.29);
+        ctx.lineTo(tx + r * 0.09, r * 0.17);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Slime drool
+      ctx.strokeStyle = slime;
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      ctx.moveTo(r * 0.08, r * 0.37);
+      ctx.lineTo(r * 0.12, r * 0.58);
+      ctx.stroke();
+
+      ctx.fillStyle = slime;
+      ctx.beginPath();
+      ctx.arc(r * 0.13, r * 0.62, 2.4, 0, TAU);
+      ctx.fill();
+
+      // Sticky feet / drips attached to platform
+      ctx.strokeStyle = bodyDark;
+      ctx.lineWidth = 1.9;
+      const footCount = 5;
+      for (let i = 0; i < footCount; i++) {
+        const fx = (-0.70 + i / 4 * 1.40) * r;
+        const fy = r * 0.72;
+        const h = r * (0.16 + (i % 2) * 0.05);
+
+        ctx.beginPath();
+        ctx.moveTo(fx - 2, fy);
+        ctx.quadraticCurveTo(fx, fy + h * 0.5, fx + 1.5, fy + h);
+        ctx.stroke();
+
+        if (i % 2 === 0) {
+          ctx.fillStyle = slime;
+          ctx.beginPath();
+          ctx.arc(fx + 1.5, fy + h + 1, 1.6, 0, TAU);
+          ctx.fill();
+        }
+      }
+
+      // True dust death: the alien quickly vanishes into powder and slime mist.
+      if (dying) {
+        const fade = clamp(1 - dustT * 1.06, 0, 1);
+
+        // Dense powder burst at the stomp point
+        for (let i = 0; i < 34; i++) {
+          const a = enemy.burnSeed * 0.009 + i * 0.43;
+          const spread = dustT * (r * 1.02 + (i % 6) * 1.9);
+          const px = Math.cos(a) * spread;
+          const py = r * 0.18 + Math.sin(a) * spread * 0.26 - dustT * (1.2 + (i % 4) * 0.55);
+
+          ctx.globalAlpha = fade * (0.11 + (i % 4) * 0.03);
+          ctx.fillStyle = i % 2 ? "#7f8a72" : "#a0ab8a";
+          ctx.beginPath();
+          ctx.arc(px, py, 1.0 + (i % 4) * 0.38 + dustT * 0.58, 0, TAU);
+          ctx.fill();
+        }
+
+        // Green slime powder / mist grains
+        for (let i = 0; i < 24; i++) {
+          const a = enemy.burnSeed * 0.015 + i * 0.57;
+          const spread = dustT * (r * 0.92 + (i % 5) * 1.8);
+          const px = Math.cos(a) * spread;
+          const py = Math.sin(a) * spread * 0.34 + r * 0.10 - dustT * (1.9 + (i % 3) * 0.7);
+
+          ctx.globalAlpha = fade * 0.25;
+          ctx.fillStyle = i % 2 ? slime : highlight;
+          ctx.beginPath();
+          ctx.arc(px, py, 0.8 + (i % 3) * 0.32, 0, TAU);
+          ctx.fill();
+        }
+
+        // A soft slime haze right where the body used to be
+        ctx.globalAlpha = fade * 0.14;
+        ctx.fillStyle = body;
+        ctx.beginPath();
+        ctx.ellipse(
+          0,
+          r * 0.20,
+          r * (0.46 + dustT * 0.42),
+          r * (0.18 + dustT * 0.08),
+          0,
+          0,
+          TAU
+        );
+        ctx.fill();
+
+        // Impact dust ring
+        if (dustT < 0.34) {
+          const ringT = dustT / 0.34;
+          ctx.globalAlpha = (1 - ringT) * 0.22;
+          ctx.strokeStyle = "#a8b08f";
+          ctx.lineWidth = 2;
           ctx.beginPath();
           ctx.ellipse(
             0,
             r * 0.28,
-            r * (0.55 + ringT * 1.00),
-            r * (0.16 + ringT * 0.34),
+            r * (0.44 + ringT * 0.96),
+            r * (0.11 + ringT * 0.26),
             0,
             0,
             TAU
           );
           ctx.stroke();
-          ctx.globalAlpha = 1;
         }
-
-        const pieceFade = clamp(1 - deathT * 1.02, 0, 1);
-
-        // Main body chunks
-        for (let i = 0; i < 7; i++) {
-          const a = enemy.burnSeed * 0.02 + i * (TAU / 7);
-          const burst = deathT * (r * 0.80 + i * 1.7);
-          const driftX = Math.cos(a) * burst;
-          const driftY = Math.sin(a) * burst * 0.55 - deathT * (6 + i * 0.8);
-
-          ctx.save();
-          ctx.translate(driftX, driftY);
-          ctx.rotate((enemy.burnSeed * 0.001 + i * 0.23) + deathT * (1.8 + i * 0.22));
-          ctx.scale(1 - deathT * 0.18, 1 - deathT * 0.22);
-
-          ctx.globalAlpha = pieceFade * 0.96;
-          ctx.fillStyle = i % 2 === 0 ? "#6f8f65" : "#765f8b";
-          ctx.strokeStyle = "#2b3030";
-          ctx.lineWidth = 1.5;
-
-          ctx.beginPath();
-          ctx.moveTo(-r * 0.12, -r * 0.10);
-          ctx.lineTo(r * 0.13, -r * 0.15);
-          ctx.lineTo(r * 0.18, r * 0.03);
-          ctx.lineTo(-r * 0.02, r * 0.18);
-          ctx.lineTo(-r * 0.16, r * 0.05);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-
-          ctx.restore();
-        }
-
-        // Spike / detail fragments
-        for (let i = 0; i < 5; i++) {
-          const a = enemy.burnSeed * 0.03 + i * 1.15 + 0.4;
-          const burst = deathT * (r * 1.05 + i * 1.6);
-          const x = Math.cos(a) * burst;
-          const y = Math.sin(a) * burst * 0.52 - deathT * (8 + i * 1.2);
-
-          ctx.globalAlpha = pieceFade * 0.82;
-          ctx.fillStyle = i % 2 ? "#7b638d" : "#6f8f65";
-          ctx.beginPath();
-          ctx.moveTo(x, y - 3.5);
-          ctx.lineTo(x + 2.8, y + 2.5);
-          ctx.lineTo(x - 2.8, y + 2.5);
-          ctx.closePath();
-          ctx.fill();
-        }
-
-        // Dust cloud / powder
-        for (let i = 0; i < 12; i++) {
-          const a = enemy.burnSeed * 0.01 + i * 0.77;
-          const spread = deathT * (r * 0.95 + (i % 4) * 2.2);
-          const x = Math.cos(a) * spread;
-          const y = r * 0.28 + Math.sin(a) * spread * 0.25 - deathT * 2.8;
-
-          ctx.globalAlpha = pieceFade * (0.22 + (i % 3) * 0.05);
-          ctx.fillStyle = i % 2 ? "#646964" : "#8d927d";
-          ctx.beginPath();
-          ctx.arc(x, y, 1.5 + (i % 4) * 0.55 + deathT * 0.5, 0, TAU);
-          ctx.fill();
-        }
-
-        // A couple of eye dots among the fragments make the death feel creature-like.
-        if (deathT < 0.72) {
-          ctx.globalAlpha = pieceFade * 0.95;
-          ctx.fillStyle = "#fffdf3";
-          ctx.beginPath();
-          ctx.arc(-r * 0.14 - deathT * 5.5, -r * 0.02 - deathT * 5.0, r * 0.10, 0, TAU);
-          ctx.arc(r * 0.16 + deathT * 4.8, -r * 0.03 - deathT * 4.2, r * 0.10, 0, TAU);
-          ctx.fill();
-
-          ctx.fillStyle = "#24282a";
-          ctx.beginPath();
-          ctx.arc(-r * 0.14 - deathT * 5.5, -r * 0.02 - deathT * 5.0, r * 0.038, 0, TAU);
-          ctx.arc(r * 0.16 + deathT * 4.8, -r * 0.03 - deathT * 4.2, r * 0.038, 0, TAU);
-          ctx.fill();
-        }
-
-        ctx.restore();
-        continue;
       }
-
-      const bodySquash = 1 + Math.sin(walkPhase + 1.15) * 0.045;
-      const bodyStretch = 1 - Math.sin(walkPhase + 1.15) * 0.022;
-      ctx.scale(bodyStretch, bodySquash);
-
-      // ------------------------------------------------------
-      // Feet / suction pads: creature visibly sits ON platform.
-      // ------------------------------------------------------
-      ctx.fillStyle = "#4e6047";
-      ctx.strokeStyle = "#2c3130";
-      ctx.lineWidth = 1.7;
-
-      const footLift = Math.sin(walkPhase) * 0.8;
-
-      ctx.beginPath();
-      ctx.ellipse(
-        -r * 0.42,
-        r * 0.57 + Math.max(0, footLift),
-        r * 0.26,
-        r * 0.13,
-        -0.08,
-        0,
-        TAU
-      );
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.ellipse(
-        r * 0.42,
-        r * 0.57 + Math.max(0, -footLift),
-        r * 0.26,
-        r * 0.13,
-        0.08,
-        0,
-        TAU
-      );
-      ctx.fill();
-      ctx.stroke();
-
-      // ------------------------------------------------------
-      // Tentacle arms behind the body.
-      // ------------------------------------------------------
-      ctx.strokeStyle = "#556f51";
-      ctx.lineWidth = 2.4;
-      ctx.lineCap = "round";
-
-      const armSwing = Math.sin(walkPhase) * 2.1;
-
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.66, -r * 0.02);
-      ctx.quadraticCurveTo(
-        -r * 1.02,
-        -r * 0.10 + armSwing,
-        -r * 1.10,
-        r * 0.20 + armSwing * 0.35
-      );
-      ctx.stroke();
-
-      ctx.beginPath();
-      ctx.moveTo(r * 0.66, -r * 0.02);
-      ctx.quadraticCurveTo(
-        r * 1.02,
-        -r * 0.10 - armSwing,
-        r * 1.10,
-        r * 0.20 - armSwing * 0.35
-      );
-      ctx.stroke();
-
-      // ------------------------------------------------------
-      // Main organic body.
-      // ------------------------------------------------------
-      ctx.fillStyle = "#6f8f65";
-      ctx.strokeStyle = "#2b3030";
-      ctx.lineWidth = 2.3;
-
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.86, r * 0.16);
-      ctx.bezierCurveTo(
-        -r * 0.96, -r * 0.34,
-        -r * 0.55, -r * 0.77,
-        -r * 0.08, -r * 0.70
-      );
-      ctx.bezierCurveTo(
-        r * 0.48, -r * 0.82,
-        r * 0.92, -r * 0.39,
-        r * 0.88, r * 0.15
-      );
-      ctx.bezierCurveTo(
-        r * 0.80, r * 0.58,
-        r * 0.43, r * 0.69,
-        0, r * 0.63
-      );
-      ctx.bezierCurveTo(
-        -r * 0.42, r * 0.70,
-        -r * 0.79, r * 0.55,
-        -r * 0.86, r * 0.16
-      );
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-
-      // Crown spikes / hairs with little rounded bulbs.
-      const spikes = [
-        [-0.56, -0.60, -0.73, -1.02],
-        [-0.18, -0.72, -0.24, -1.14],
-        [ 0.20, -0.73,  0.23, -1.15],
-        [ 0.56, -0.58,  0.73, -0.98],
-      ];
-
-      ctx.strokeStyle = "#516d4d";
-      ctx.lineWidth = 2.1;
-      for (const s of spikes) {
-        ctx.beginPath();
-        ctx.moveTo(r * s[0], r * s[1]);
-        ctx.quadraticCurveTo(
-          r * ((s[0] + s[2]) * 0.5),
-          r * (s[3] * 0.90),
-          r * s[2],
-          r * s[3]
-        );
-        ctx.stroke();
-
-        ctx.fillStyle = "#7b638d";
-        ctx.beginPath();
-        ctx.arc(r * s[2], r * s[3], r * 0.09, 0, TAU);
-        ctx.fill();
-      }
-
-      // Spots / skin details.
-      ctx.fillStyle = "#765f8b";
-      ctx.beginPath();
-      ctx.ellipse(-r * 0.54, r * 0.09, r * 0.18, r * 0.13, -0.3, 0, TAU);
-      ctx.ellipse(r * 0.54, r * 0.17, r * 0.13, r * 0.17, 0.25, 0, TAU);
-      ctx.ellipse(r * 0.06, r * 0.40, r * 0.11, r * 0.08, 0, 0, TAU);
-      ctx.fill();
-
-      ctx.fillStyle = "rgba(255,255,255,.15)";
-      ctx.beginPath();
-      ctx.ellipse(-r * 0.32, -r * 0.42, r * 0.22, r * 0.10, -0.3, 0, TAU);
-      ctx.fill();
-
-      // Face.
-      const eyeLook = enemy.patrolDir * r * 0.065;
-      const blink = Math.sin(enemy.age * 2.7 + enemy.burnSeed) > 0.94;
-
-      ctx.strokeStyle = "#29302e";
-      ctx.lineWidth = 1.8;
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.48, -r * 0.32);
-      ctx.lineTo(-r * 0.14, -r * 0.23);
-      ctx.moveTo(r * 0.48, -r * 0.32);
-      ctx.lineTo(r * 0.14, -r * 0.23);
-      ctx.stroke();
-
-      if (!blink) {
-        ctx.fillStyle = "#fffdf3";
-        ctx.beginPath();
-        ctx.ellipse(-r * 0.27, -r * 0.10, r * 0.20, r * 0.23, 0, 0, TAU);
-        ctx.ellipse(r * 0.27, -r * 0.10, r * 0.20, r * 0.23, 0, 0, TAU);
-        ctx.fill();
-
-        ctx.fillStyle = "#24282a";
-        ctx.beginPath();
-        ctx.arc(-r * 0.27 + eyeLook, -r * 0.06, r * 0.082, 0, TAU);
-        ctx.arc(r * 0.27 + eyeLook, -r * 0.06, r * 0.082, 0, TAU);
-        ctx.fill();
-
-        ctx.fillStyle = "#ffffff";
-        ctx.beginPath();
-        ctx.arc(-r * 0.24 + eyeLook, -r * 0.10, r * 0.028, 0, TAU);
-        ctx.arc(r * 0.30 + eyeLook, -r * 0.10, r * 0.028, 0, TAU);
-        ctx.fill();
-      } else {
-        ctx.strokeStyle = "#24282a";
-        ctx.lineWidth = 1.7;
-        ctx.beginPath();
-        ctx.moveTo(-r * 0.43, -r * 0.08);
-        ctx.lineTo(-r * 0.13, -r * 0.08);
-        ctx.moveTo(r * 0.13, -r * 0.08);
-        ctx.lineTo(r * 0.43, -r * 0.08);
-        ctx.stroke();
-      }
-
-      // Dark mouth with two little teeth.
-      ctx.fillStyle = "#382b35";
-      ctx.beginPath();
-      ctx.ellipse(0, r * 0.26, r * 0.30, r * 0.18, 0, 0, TAU);
-      ctx.fill();
-
-      ctx.fillStyle = "#fff8e9";
-      ctx.beginPath();
-      ctx.moveTo(-r * 0.15, r * 0.13);
-      ctx.lineTo(-r * 0.05, r * 0.28);
-      ctx.lineTo(r * 0.01, r * 0.13);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.moveTo(r * 0.08, r * 0.13);
-      ctx.lineTo(r * 0.17, r * 0.28);
-      ctx.lineTo(r * 0.23, r * 0.13);
-      ctx.closePath();
-      ctx.fill();
-
-      ctx.fillStyle = "#d9828f";
-      ctx.beginPath();
-      ctx.ellipse(0, r * 0.34, r * 0.14, r * 0.06, 0, 0, TAU);
-      ctx.fill();
 
       ctx.restore();
     }
