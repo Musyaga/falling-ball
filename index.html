@@ -494,6 +494,27 @@
     nextPlatformId: 1,
     lastTypes: [],
 
+    // PHASE-0 — enemy state + deterministic RNG
+    enemies: [],
+    recentEnemyPlatforms: [],
+    nextEnemyId: 1,
+    runSeed: 0x51f15e3d,
+    rngState: 0x51f15e3d,
+    rng() {
+      // xorshift32: deterministic and cheap.
+      let x = this.rngState | 0;
+      x ^= x << 13;
+      x ^= x >>> 17;
+      x ^= x << 5;
+      this.rngState = x >>> 0;
+      return (this.rngState >>> 0) / 4294967296;
+    },
+    setRunSeed(seed) {
+      const s = (seed >>> 0) || 0x51f15e3d;
+      this.runSeed = s;
+      this.rngState = s;
+    },
+
     lastLandingPlatformY: null,
 
     accumulator: 0,
@@ -567,12 +588,35 @@
     lastBouncePlatformId: null
   };
 
+  // PHASE-1
+  // FLICK İLE EZME — sadece dikey pointer hareketini izler.
+  const CONFIG = {
+    controls: {
+      flickThreshold: 1050,   // CSS px / second, downward is positive
+      flickWindowMs: 135,
+      flickMinTravel: 24,
+      flickCooldownMs: 180
+    }
+  };
+
   const INPUT = {
     active: false,
     pointerId: null,
     lastPointerX: 0,
     keyboardDir: 0,
-    keyboardSpeed: 540
+    keyboardSpeed: 540,
+
+    // Parallel Y-only flick detector. Does not drive PLAYER.targetX.
+    flickSamples: [],
+    lastFlickAt: -Infinity,
+    flickPulse: 0,
+
+    // Special stomp/flick animation state.
+    stompDashTimer: 0,
+    stompDashDuration: 0.18,
+    stompDashSpeed: 900,
+    angryFaceTimer: 0,
+    stompTargetId: null
   };
 
   // ============================================================
@@ -691,6 +735,11 @@
     perfect() {
       this.blip(620, 0.07, 0.20);
       setTimeout(() => this.blip(820, 0.06, 0.16), 45);
+    },
+    // PHASE-1 — pooled comic squash sound, no new persistent audio nodes.
+    squash() {
+      this.blip(145, 0.085, 0.16, "triangle");
+      setTimeout(() => this.blip(92, 0.055, 0.10, "square"), 28);
     },
     break() { this.blip(110, 0.12, 0.20, "square"); },
     crack() { this.blip(92, 0.18, 0.22, "sawtooth"); },
@@ -1010,6 +1059,46 @@
     }
   }
 
+
+  // PHASE-0 — compatibility wrapper over the EXISTING particle pool.
+  // No new per-frame particle allocations are introduced.
+  const ParticleSys = {
+    spawn(x, y, options = {}) {
+      const count = options.count ?? 1;
+      const color = options.color || "#6d8b63";
+      for (let i = 0; i < count; i++) {
+        const angle = STATE.rng() * TAU;
+        const speed = (options.speedMin ?? 35) +
+          STATE.rng() * ((options.speedMax ?? 90) - (options.speedMin ?? 35));
+
+        spawnParticle(
+          x,
+          y,
+          Math.cos(angle) * speed,
+          Math.sin(angle) * speed - (options.lift ?? 20),
+          (options.lifeMin ?? 0.24) +
+            STATE.rng() * ((options.lifeMax ?? 0.42) - (options.lifeMin ?? 0.24)),
+          (options.sizeMin ?? 2) +
+            STATE.rng() * ((options.sizeMax ?? 4) - (options.sizeMin ?? 2))
+        );
+      }
+      // Existing particle renderer is single-color; keep requested enemy color
+      // as metadata for future renderer upgrades without allocating new nodes.
+      this.lastColor = color;
+    },
+    lastColor: "#6d8b63"
+  };
+
+  // Current game does not have a separate wind-particle pool; preserve the
+  // existing wind renderer through this compatibility handle.
+  const WindParticleSys = {
+    activeCount: 0
+  };
+
+  // Compatibility alias for systems that refer to the platform array directly.
+  // STATE.platforms is never reassigned; only its contents are mutated.
+  let platforms = STATE.platforms;
+
   function updateParticles(dt) {
     for (const p of particles) {
       if (!p.active) continue;
@@ -1121,6 +1210,131 @@
     return type;
   }
 
+
+  // PHASE-0 — MİKROP DÜŞMAN NESNESİ
+  class Enemy {
+    constructor(platformRef) {
+      this.id = STATE.nextEnemyId++;
+      this.platformRef = platformRef;
+      this.radius = 11;
+
+      // PHASE-0 — enemy uses only the middle ~40% of the platform.
+      // The platform itself is NEVER shortened for an enemy.
+      this.patrolMin = Math.max(this.radius + 8, platformRef.w * 0.30);
+      this.patrolMax = Math.min(
+        platformRef.w - this.radius - 8,
+        platformRef.w * 0.70
+      );
+
+      if (this.patrolMax <= this.patrolMin) {
+        const center = platformRef.w * 0.5;
+        this.patrolMin = center - 2;
+        this.patrolMax = center + 2;
+      }
+
+      this.localX = this.patrolMin +
+        STATE.rng() * Math.max(1, this.patrolMax - this.patrolMin);
+
+      this.patrolDir = STATE.rng() < 0.5 ? -1 : 1;
+      this.patrolSpeed = 22 + STATE.rng() * 18;
+
+      this.x = platformRef.x + this.localX;
+      this.y = platformRef.y - this.radius;
+      this.prevX = this.x;
+      this.prevY = this.y;
+
+      this.active = true;
+      this.squashed = false;
+      this.squashTimer = 0;
+      this.squashDuration = 0.34;
+      this.burnSeed = STATE.rng() * 1000;
+      this.age = STATE.rng() * 3;
+    }
+
+    update(dt) {
+      this.prevX = this.x;
+      this.prevY = this.y;
+
+      if (this.squashed) {
+        this.squashTimer += dt;
+        return;
+      }
+
+      if (!this.active || !this.platformRef || this.platformRef.broken) {
+        this.active = false;
+        return;
+      }
+
+      this.age += dt;
+      this.localX += this.patrolDir * this.patrolSpeed * dt;
+
+      if (this.localX <= this.patrolMin) {
+        this.localX = this.patrolMin;
+        this.patrolDir = 1;
+      } else if (this.localX >= this.patrolMax) {
+        this.localX = this.patrolMax;
+        this.patrolDir = -1;
+      }
+
+      // Follow the platform's scroll + horizontal movement exactly.
+      this.x = this.platformRef.x + this.localX;
+      this.y = this.platformRef.y - this.radius;
+    }
+  }
+
+  function activeEnemyCount() {
+    let count = 0;
+    for (const e of STATE.enemies) if (e.active && !e.squashed) count++;
+    return count;
+  }
+
+  function maybeSpawnEnemy(platform) {
+    if (!platform) return;
+    if (platform.type !== TYPE.NORMAL && platform.type !== TYPE.MOVING) return;
+    if (platform.noEnemy) return;
+    if (activeEnemyCount() >= 7) return;
+
+    // Anti-streak stays, but enemies are intentionally more common now.
+    // Never allow 5 enemy-bearing eligible platforms consecutively.
+    const recent = STATE.recentEnemyPlatforms;
+    if (
+      recent.length >= 4 &&
+      recent[recent.length - 1] &&
+      recent[recent.length - 2] &&
+      recent[recent.length - 3] &&
+      recent[recent.length - 4]
+    ) {
+      recent.push(false);
+      if (recent.length > 4) recent.shift();
+      return;
+    }
+
+    const hasEnemy = STATE.rng() < 0.48;
+    recent.push(hasEnemy);
+    if (recent.length > 4) recent.shift();
+
+    if (!hasEnemy) return;
+    STATE.enemies.push(new Enemy(platform));
+  }
+
+  function updateEnemies(dt) {
+    for (const enemy of STATE.enemies) enemy.update(dt);
+
+    const livingPlatformIds = new Set(
+      STATE.platforms.filter(p => !p.broken).map(p => p.id)
+    );
+
+    STATE.enemies = STATE.enemies.filter(enemy => {
+      if (!enemy.platformRef || !livingPlatformIds.has(enemy.platformRef.id)) {
+        return false;
+      }
+      if (enemy.squashed) {
+        return enemy.squashTimer < enemy.squashDuration;
+      }
+      return enemy.active && enemy.y < H + 100 && enemy.y > -120;
+    });
+  }
+
   function createPlatform(type, x, y, w) {
     return {
       id: STATE.nextPlatformId++,
@@ -1145,6 +1359,7 @@
 
       nearMissGranted: false,
       perfectGranted: false,
+      noEnemy: false,
 
       // visual feedback only
       impact: 0,
@@ -1191,6 +1406,13 @@
     return 132;
   }
 
+  // PHASE-0
+  // PLATFORM GENİŞLİĞİ REGRESYONU DÜZELTMESİ
+  // Enemy sistemi platform genişliğini ASLA değiştirmez.
+  // Geniş platform dağılımı korunur: 88 <= w < 154.
+  const PLATFORM_WIDTH_MIN = 88;
+  const PLATFORM_WIDTH_RANGE = 66;
+
   function spawnNextPlatform() {
     // Batch yok: her çağrıda SADECE 1 platform.
     const lowest = STATE.platforms.reduce((best, p) => {
@@ -1202,11 +1424,13 @@
     const gap = chooseReachableGap();
     const y = baseY + gap;
 
-    const w = 70 + Math.random() * 60;
+    const w = PLATFORM_WIDTH_MIN + Math.random() * PLATFORM_WIDTH_RANGE;
     const x = 20 + Math.random() * (W - w - 40);
     const type = choosePlatformType();
 
-    STATE.platforms.push(createPlatform(type, x, y, w));
+    const platform = createPlatform(type, x, y, w);
+    STATE.platforms.push(platform);
+    maybeSpawnEnemy(platform);
   }
 
   function buildInitialPlatforms() {
@@ -1214,11 +1438,17 @@
     STATE.lastTypes.length = 0;
     STATE.nextPlatformId = 1;
 
-    const startW = 120;
+    // PHASE-3 — tutorial/start platform is always enemy-free.
+    STATE.enemies.length = 0;
+    STATE.recentEnemyPlatforms.length = 0;
+    STATE.nextEnemyId = 1;
+
+    const startW = 150;
     const startY = IS_MOBILE ? Math.min(H * 0.58, 610) : H * 0.66;
-    STATE.platforms.push(
-      createPlatform(TYPE.NORMAL, W * 0.5 - startW * 0.5, startY, startW)
-    );
+    const tutorialPlatform =
+      createPlatform(TYPE.NORMAL, W * 0.5 - startW * 0.5, startY, startW);
+    tutorialPlatform.noEnemy = true;
+    STATE.platforms.push(tutorialPlatform);
 
     // Başlangıçta sadece ekranı dolduracak kadar.
     // Her gap yine ayrı ayrı güncel hesapla oluşturuluyor.
@@ -1234,22 +1464,17 @@
       if (!p.broken && p.y > lowestY) lowestY = p.y;
     }
 
+    // Platforms are generated only from scroll progression, never because
+    // the player is falling or because the visible count became low.
+    // Keep a modest off-screen runway so nothing can feel like a rescue spawn.
     let spawnGuard = 0;
-    const platformBuffer = IS_MOBILE ? Math.max(420, H * 0.42) : 420;
-    while (lowestY < H + platformBuffer && spawnGuard < 7) {
+    const platformBuffer = IS_MOBILE ? 220 : 190;
+
+    while (lowestY < H + platformBuffer && spawnGuard < 3) {
       spawnNextPlatform();
       const newest = STATE.platforms[STATE.platforms.length - 1];
       lowestY = newest ? newest.y : lowestY;
       spawnGuard++;
-    }
-
-    // Emergency density guard: never let the run feel empty.
-    const minVisiblePlatforms = IS_MOBILE
-      ? Math.max(7, Math.ceil(H / 165))
-      : 7;
-
-    while (STATE.platforms.length < minVisiblePlatforms) {
-      spawnNextPlatform();
     }
   }
 
@@ -1418,6 +1643,11 @@
   function resetGame() {
     STATE.time = 0;
     STATE.score = 0;
+
+    // PHASE-3 — deterministic enemy sequence for this run.
+    // Ghost/replay code can call STATE.setRunSeed(savedSeed) before rebuild.
+    const nextSeed = ((Date.now() ^ Math.floor(performance.now() * 1000)) >>> 0) || 1;
+    STATE.setRunSeed(nextSeed);
     STATE.combo = 0;
     STATE.multiplier = 1;
     STATE.scrollSpeed = 205;
@@ -1638,10 +1868,11 @@
       p.y < safeY - 150 || p.y > safeY + 150
     );
 
-    const safeW = 150;
+    const safeW = 180;
     const safeX = clamp(W * 0.5 - safeW * 0.5, 18, W - safeW - 18);
     const safePlatform = createPlatform(TYPE.NORMAL, safeX, safeY, safeW);
     safePlatform.perfectGranted = true;
+    safePlatform.noEnemy = true;
     STATE.platforms.push(safePlatform);
 
     PLAYER.x = W * 0.5;
@@ -1824,6 +2055,19 @@
   // 8) OYUNCU GÜNCELLE — SONRA PLAYER
   // ============================================================
   function updatePlayer(dt) {
+    INPUT.flickPulse *= Math.max(0, 1 - 18 * dt);
+    INPUT.angryFaceTimer = Math.max(0, INPUT.angryFaceTimer - dt);
+
+    if (INPUT.stompDashTimer > 0) {
+      INPUT.stompDashTimer = Math.max(0, INPUT.stompDashTimer - dt);
+
+      // Real downward stomp motion: fast but short-lived.
+      PLAYER.vy = Math.max(PLAYER.vy, INPUT.stompDashSpeed);
+
+      // Strong visual compression during the dive.
+      PLAYER.squash = Math.max(PLAYER.squash, 0.18);
+      PLAYER.stretch = Math.max(PLAYER.stretch, 0.16);
+    }
     PLAYER.prevX = PLAYER.x;
     PLAYER.prevY = PLAYER.y;
 
@@ -2132,6 +2376,178 @@
     }
   }
 
+
+  // PHASE-1
+  // EZME ARTIK SADECE HIZLI AŞAĞI FLICK İLE TETİKLENİR.
+  function squashEnemy(enemy) {
+    if (!enemy || !enemy.active || enemy.squashed) return false;
+
+    enemy.squashed = true;
+    enemy.active = false;
+    enemy.squashTimer = 0;
+
+    // Preserve the existing successful-stomp result.
+    PLAYER.y = enemy.y - enemy.radius - PLAYER.radius + 1;
+    PLAYER.prevY = PLAYER.y;
+    PLAYER.vy = -PLAYER.jumpVelocity;
+    PLAYER.lastBouncePlatformId = enemy.platformRef?.id ?? null;
+    PLAYER.squash = Math.max(PLAYER.squash, 0.24);
+    PLAYER.stretch = -0.03;
+
+    const bonus = 30;
+    STATE.score += bonus;
+    STATE.combo += 1;
+    STATE.speedPulse = Math.max(STATE.speedPulse, 0.10);
+    STATE.impactShake = Math.max(STATE.impactShake, 1.3);
+
+    ParticleSys.spawn(enemy.x, enemy.y, {
+      count: 12,
+      color: "#6e8f62",
+      speedMin: 44,
+      speedMax: 112,
+      lift: 34,
+      lifeMin: 0.26,
+      lifeMax: 0.48,
+      sizeMin: 2,
+      sizeMax: 4.5
+    });
+
+    // Second, hotter burst for a tiny burn/explosion feel.
+    ParticleSys.spawn(enemy.x, enemy.y - 2, {
+      count: 7,
+      color: "#f19a46",
+      speedMin: 28,
+      speedMax: 86,
+      lift: 52,
+      lifeMin: 0.20,
+      lifeMax: 0.38,
+      sizeMin: 1.5,
+      sizeMax: 3.4
+    });
+
+    popup(`+${bonus}`, enemy.x, enemy.y - 20, "good");
+    AudioSys.squash();
+    updateHUD();
+
+    return true;
+  }
+
+  function findEnemyInFlickRange() {
+    const range = PLAYER.radius * 4;
+    let best = null;
+    let bestDistSq = Infinity;
+
+    for (const enemy of STATE.enemies) {
+      if (!enemy.active || enemy.squashed) continue;
+
+      const dx = enemy.x - PLAYER.x;
+      const dy = enemy.y - PLAYER.y;
+
+      // Generous area around/below the player. Do not grab enemies far above.
+      if (dy < -PLAYER.radius * 0.6 || dy > range) continue;
+      if (Math.abs(dx) > range) continue;
+
+      const distSq = dx * dx + dy * dy;
+      if (distSq <= range * range && distSq < bestDistSq) {
+        best = enemy;
+        bestDistSq = distSq;
+      }
+    }
+
+    return best;
+  }
+
+  function triggerDownFlick() {
+    if (STATE.mode !== MODE.PLAYING) return;
+
+    INPUT.flickPulse = 1;
+    INPUT.stompDashTimer = INPUT.stompDashDuration;
+    INPUT.angryFaceTimer = 0.30;
+
+    // Lock the nearest eligible enemy only as a stomp target hint.
+    // The enemy is NOT killed until the ball actually reaches it.
+    const enemy = findEnemyInFlickRange();
+    INPUT.stompTargetId = enemy ? enemy.id : null;
+
+    PLAYER.squash = Math.max(PLAYER.squash, 0.20);
+    PLAYER.stretch = Math.max(PLAYER.stretch, 0.14);
+    PLAYER.vy = Math.max(PLAYER.vy, INPUT.stompDashSpeed);
+
+    if (navigator.vibrate) {
+      try { navigator.vibrate(15); } catch (_) {}
+    }
+
+    // No enemy in range => still perform the short dive, with no score penalty.
+  }
+
+  function checkEnemyContactDeath() {
+    if (STATE.mode !== MODE.PLAYING) return false;
+
+    for (const enemy of STATE.enemies) {
+      if (!enemy.active || enemy.squashed) continue;
+
+      const dx = PLAYER.x - enemy.x;
+      const dy = PLAYER.y - enemy.y;
+
+      // Slightly forgiving circular body overlap.
+      const hitRadius = PLAYER.radius + enemy.radius * 0.82;
+      if (dx * dx + dy * dy <= hitRadius * hitRadius) {
+        const stompActive =
+          INPUT.stompDashTimer > 0 &&
+          PLAYER.vy > 0 &&
+          PLAYER.y <= enemy.y + enemy.radius * 0.7;
+
+        if (stompActive) {
+          INPUT.stompDashTimer = 0;
+          INPUT.stompTargetId = null;
+          squashEnemy(enemy);
+          return false;
+        }
+
+        beginDeath("You touched a microbe.");
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function recordFlickSample(clientY, timeStamp) {
+    const now = Number.isFinite(timeStamp) ? timeStamp : performance.now();
+    const samples = INPUT.flickSamples;
+
+    samples.push({ y: clientY, t: now });
+
+    const cutoff = now - CONFIG.controls.flickWindowMs;
+    while (samples.length > 2 && samples[0].t < cutoff) {
+      samples.shift();
+    }
+
+    if (samples.length < 2) return;
+
+    const first = samples[0];
+    const last = samples[samples.length - 1];
+    const dtMs = last.t - first.t;
+    if (dtMs < 20) return;
+
+    const deltaY = last.y - first.y;
+    const verticalVelocity = deltaY / (dtMs / 1000);
+
+    const cooldownReady =
+      now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs;
+
+    if (
+      cooldownReady &&
+      deltaY >= CONFIG.controls.flickMinTravel &&
+      verticalVelocity >= CONFIG.controls.flickThreshold
+    ) {
+      INPUT.lastFlickAt = now;
+      samples.length = 0;
+      samples.push({ y: clientY, t: now });
+      triggerDownFlick();
+    }
+  }
+
   // ============================================================
   // 10) NEAR MISS
   // ============================================================
@@ -2284,13 +2700,36 @@
     }
     updateTheme(dt);
 
-    // Critical order:
-    // 1) platforms + wind zones
-    // 2) player
-    // 3) swept collision
+    // PHASE-1 — Enemy stomp is NOT automatic anymore.
+    // Normal platform collision always runs; flick is an independent input event.
     updatePlatforms(dt);
+    updateEnemies(dt);
     updatePlayer(dt);
+
+    // STRICT VOID RULE:
+    // The instant the ball's bottom edge touches the screen bottom line,
+    // death wins before any platform collision can save the player.
+    if (PLAYER.y + PLAYER.radius >= H) {
+      PLAYER.x = clamp(PLAYER.x, PLAYER.radius + 2, W - PLAYER.radius - 2);
+      PLAYER.y = H - PLAYER.radius;
+      PLAYER.prevY = PLAYER.y;
+      PLAYER.vy = 0;
+
+      beginDeath("You fell into the void.");
+      updateParticles(dt);
+      updatePopups(dt);
+      return;
+    }
+
     sweptPlatformCollision();
+
+    // Normal contact with a living microbe is deadly.
+    // Flick-squashed enemies are inactive and ignored here.
+    if (checkEnemyContactDeath()) {
+      updateParticles(dt);
+      updatePopups(dt);
+      return;
+    }
 
     if (STATE.mode !== MODE.PLAYING) {
       updateParticles(dt);
@@ -2309,9 +2748,7 @@
       return;
     }
 
-    if (PLAYER.y - PLAYER.radius > H + 40) {
-      beginDeath("You fell into the void.");
-    }
+
   }
 
   // ============================================================
@@ -2562,6 +2999,127 @@
     ctx.globalAlpha = 1;
   }
 
+
+  // MİKROP GÖRSELİ / PATROL ANİMASYONU / EZİLME FADE
+  function drawEnemies() {
+    for (const enemy of STATE.enemies) {
+      if (!enemy.active && !enemy.squashed) continue;
+
+      const squashing = enemy.squashed;
+      const squashT = squashing
+        ? clamp(enemy.squashTimer / enemy.squashDuration, 0, 1)
+        : 0;
+
+      const bodyFade = squashing ? clamp(1 - squashT * 1.12, 0, 1) : 1;
+      const walkBob = squashing ? 0 : Math.sin(enemy.age * 8.5) * 1.5;
+
+      // Stronger squash first, then disappearance.
+      const compression = squashing ? lerp(1, 0.10, Math.min(1, squashT * 1.7)) : 1;
+      const stretchX = squashing ? lerp(1, 1.72, Math.min(1, squashT * 1.5)) : 1;
+      const walkSquash = squashing
+        ? compression
+        : 1 + Math.sin(enemy.age * 8.5 + 1.2) * 0.055;
+
+      const r = enemy.radius;
+
+      ctx.save();
+      ctx.translate(enemy.x, enemy.y + walkBob);
+
+      // Burn / explosion halo after stomp.
+      if (squashing) {
+        const burstT = clamp(squashT / 0.75, 0, 1);
+
+        // Orange/yellow flame tongues.
+        for (let i = 0; i < 5; i++) {
+          const phase = enemy.burnSeed + i * 1.73;
+          const side = (i - 2) * r * 0.28;
+          const rise = burstT * (9 + i * 2.4);
+          const flicker = Math.sin(STATE.time * 24 + phase) * 1.6;
+
+          ctx.globalAlpha = (1 - burstT) * 0.72;
+          ctx.fillStyle = i % 2 === 0 ? "#f29a3f" : "#ffd166";
+          ctx.beginPath();
+          ctx.ellipse(
+            side + flicker,
+            -r * 0.15 - rise,
+            2.2 + (i % 2),
+            4.8 + (i % 3) * 1.3,
+            flicker * 0.05,
+            0,
+            TAU
+          );
+          ctx.fill();
+        }
+
+        // Small smoke puffs.
+        for (let i = 0; i < 3; i++) {
+          const phase = enemy.burnSeed * 0.7 + i * 2.1;
+          const drift = Math.sin(phase + STATE.time * 4) * 4;
+          ctx.globalAlpha = (1 - squashT) * 0.22;
+          ctx.fillStyle = "#494b49";
+          ctx.beginPath();
+          ctx.arc(
+            drift + (i - 1) * 4,
+            -r * 0.8 - squashT * (12 + i * 5),
+            2.5 + i * 0.7,
+            0,
+            TAU
+          );
+          ctx.fill();
+        }
+
+        ctx.globalAlpha = 1;
+      }
+
+      ctx.scale(stretchX, walkSquash);
+      ctx.globalAlpha = bodyFade;
+
+      ctx.fillStyle = squashing ? "#6a654e" : "#728d63";
+      ctx.strokeStyle = "#302f38";
+      ctx.lineWidth = 2;
+
+      ctx.beginPath();
+      ctx.ellipse(0, 0, r * 0.95, r * 0.72, 0, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.lineWidth = 2.2;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.50, -r * 0.52);
+      ctx.lineTo(-r * 0.68, -r * 0.96);
+      ctx.moveTo(0, -r * 0.66);
+      ctx.lineTo(r * 0.04, -r * 1.08);
+      ctx.moveTo(r * 0.48, -r * 0.52);
+      ctx.lineTo(r * 0.67, -r * 0.91);
+      ctx.stroke();
+
+      ctx.fillStyle = squashing ? "#7d5a48" : "#735f86";
+      ctx.beginPath();
+      ctx.arc(-r * 0.55, r * 0.05, r * 0.18, 0, TAU);
+      ctx.arc(r * 0.57, r * 0.10, r * 0.14, 0, TAU);
+      ctx.fill();
+
+      if (!squashing || squashT < 0.48) {
+        ctx.fillStyle = "#fffdf4";
+        ctx.beginPath();
+        ctx.arc(-r * 0.28, -r * 0.08, r * 0.18, 0, TAU);
+        ctx.arc(r * 0.28, -r * 0.08, r * 0.18, 0, TAU);
+        ctx.fill();
+
+        ctx.fillStyle = "#25272b";
+        const eyeLook = enemy.patrolDir * r * 0.055;
+        ctx.beginPath();
+        ctx.arc(-r * 0.28 + eyeLook, -r * 0.06, r * 0.075, 0, TAU);
+        ctx.arc(r * 0.28 + eyeLook, -r * 0.06, r * 0.075, 0, TAU);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    ctx.globalAlpha = 1;
+  }
   function drawWindZones() {
     const e = STATE.windEvent;
     if (!e) return;
@@ -2830,25 +3388,29 @@
     const tilt = PLAYER.visualTilt + horizontalIntent * 0.035;
 
     const horizontalDeform = clamp(Math.abs(PLAYER.visualVX) / 1700, 0, 0.10);
+    const flickVisual = INPUT.flickPulse;
     const sx =
       1 +
       PLAYER.squash * 0.18 -
       PLAYER.stretch * 0.08 +
-      horizontalDeform * 0.45;
+      horizontalDeform * 0.45 +
+      flickVisual * 0.08;
     const sy =
       1 -
       PLAYER.squash * 0.16 +
       PLAYER.stretch * 0.14 -
-      horizontalDeform * 0.32;
+      horizontalDeform * 0.32 -
+      flickVisual * 0.10;
 
     // Softer and more readable motion streaks.
     if (STATE.mode === MODE.PLAYING) {
       const trailStrength = clamp(
         (Math.abs(PLAYER.vy) - 240) / 470 +
         Math.abs(horizontalMotion) * 0.11 +
-        Math.abs(PLAYER.windVX) / 650,
+        Math.abs(PLAYER.windVX) / 650 +
+        (INPUT.stompDashTimer > 0 ? 0.42 : 0),
         0,
-        0.44
+        0.72
       );
 
       if (trailStrength > 0.03) {
@@ -2917,11 +3479,12 @@
     const fallingFast = PLAYER.vy > 390;
     const fallingVeryFast = PLAYER.vy > 560;
     const fallingExtreme = PLAYER.vy > 760;
+    const angryStomp = INPUT.angryFaceTimer > 0;
 
     // Eyes open dramatically on long falls.
-    const eyeYOffset = fallingExtreme ? -0.8 : (fallingFast ? -1.5 : -2.2);
-    const eyeOuterW = fallingExtreme ? 6.6 : (fallingFast ? 5.4 : 4.7);
-    const eyeOuterH = fallingExtreme ? 8.5 : (fallingVeryFast ? 6.9 : (fallingFast ? 6.1 : 5.5));
+    const eyeYOffset = angryStomp ? -1.2 : (fallingExtreme ? -0.8 : (fallingFast ? -1.5 : -2.2));
+    const eyeOuterW = angryStomp ? 5.8 : (fallingExtreme ? 6.6 : (fallingFast ? 5.4 : 4.7));
+    const eyeOuterH = angryStomp ? 5.4 : (fallingExtreme ? 8.5 : (fallingVeryFast ? 6.9 : (fallingFast ? 6.1 : 5.5)));
 
     function drawEye(cx) {
       ctx.save();
@@ -2937,8 +3500,8 @@
       ctx.beginPath();
       ctx.arc(
         cx + look,
-        eyeYOffset + (fallingFast ? 0.35 : 0),
-        fallingExtreme ? 1.45 : (fallingVeryFast ? 1.8 : 2.0),
+        eyeYOffset + (angryStomp ? 1.05 : (fallingFast ? 0.35 : 0)),
+        angryStomp ? 1.9 : (fallingExtreme ? 1.45 : (fallingVeryFast ? 1.8 : 2.0)),
         0,
         TAU
       );
@@ -2954,40 +3517,67 @@
     drawEye(7.2);
 
     // Brows/lids
-    ctx.strokeStyle = "rgba(29,35,32,.65)";
-    ctx.lineWidth = 1.7;
+    ctx.strokeStyle = angryStomp
+      ? "rgba(29,35,32,.95)"
+      : "rgba(29,35,32,.65)";
+    ctx.lineWidth = angryStomp ? 2.3 : 1.7;
     ctx.lineCap = "round";
 
-    if (fallingExtreme) {
-      ctx.strokeStyle = "rgba(29,35,32,.45)";
+    if (angryStomp) {
+      // Strong inward V brows: angry-emoji read.
+      ctx.beginPath();
+      ctx.moveTo(-11 + look * 0.16, -9.2);
+      ctx.lineTo(-3.1 + look * 0.20, -6.2);
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(11 + look * 0.16, -9.2);
+      ctx.lineTo(3.1 + look * 0.20, -6.2);
+      ctx.stroke();
+    } else {
+      if (fallingExtreme) {
+        ctx.strokeStyle = "rgba(29,35,32,.45)";
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(-11.3 + look * 0.22, -8.7 - Math.abs(horizontalIntent) * 0.5);
+      ctx.quadraticCurveTo(
+        -7.0 + look * 0.3,
+        -11.0 - horizontalIntent * 0.7,
+        -3.0 + look * 0.28,
+        -8.1
+      );
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(3.0 + look * 0.28, -8.1);
+      ctx.quadraticCurveTo(
+        7.0 + look * 0.3,
+        -11.0 + horizontalIntent * 0.7,
+        11.3 + look * 0.22,
+        -8.7 - Math.abs(horizontalIntent) * 0.5
+      );
+      ctx.stroke();
     }
-
-    ctx.beginPath();
-    ctx.moveTo(-11.3 + look * 0.22, -8.7 - Math.abs(horizontalIntent) * 0.5);
-    ctx.quadraticCurveTo(
-      -7.0 + look * 0.3,
-      -11.0 - horizontalIntent * 0.7,
-      -3.0 + look * 0.28,
-      -8.1
-    );
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(3.0 + look * 0.28, -8.1);
-    ctx.quadraticCurveTo(
-      7.0 + look * 0.3,
-      -11.0 + horizontalIntent * 0.7,
-      11.3 + look * 0.22,
-      -8.7 - Math.abs(horizontalIntent) * 0.5
-    );
-    ctx.stroke();
 
     // Mouth
     ctx.strokeStyle = "rgba(29,35,32,.82)";
     ctx.fillStyle = "transparent";
     ctx.lineWidth = 1.65;
 
-    if (fallingFast) {
+    if (angryStomp) {
+      // Open angry mouth, emoji-like but still in the paper style.
+      ctx.fillStyle = "#302326";
+      ctx.beginPath();
+      ctx.ellipse(horizontalIntent * 0.6, 6.8, 4.8, 4.2, 0, 0, TAU);
+      ctx.fill();
+
+      // Small tooth highlight keeps the mouth readable rather than a flat dark blob.
+      ctx.fillStyle = "#fff7ea";
+      ctx.beginPath();
+      ctx.roundRect?.(-2.8 + horizontalIntent * 0.6, 3.3, 5.6, 1.8, 0.8);
+      ctx.fill();
+    } else if (fallingFast) {
       ctx.beginPath();
       ctx.ellipse(
         horizontalIntent * 1.2,
@@ -3146,6 +3736,7 @@
     const savedPlayerX = PLAYER.x;
     const savedPlayerY = PLAYER.y;
     const savedPlatformPositions = [];
+    const savedEnemyPositions = [];
 
     if (STATE.mode === MODE.PLAYING || STATE.mode === MODE.TUTORIAL) {
       PLAYER.x = lerp(PLAYER.prevX, PLAYER.x, alpha);
@@ -3155,6 +3746,12 @@
         savedPlatformPositions.push([p, p.x, p.y]);
         p.x = lerp(p.prevX, p.x, alpha);
         p.y = lerp(p.prevY, p.y, alpha);
+      }
+
+      for (const enemy of STATE.enemies) {
+        savedEnemyPositions.push([enemy, enemy.x, enemy.y]);
+        enemy.x = lerp(enemy.prevX, enemy.x, alpha);
+        enemy.y = lerp(enemy.prevY, enemy.y, alpha);
       }
     }
 
@@ -3175,6 +3772,7 @@
 
     drawBackground();
     drawPlatforms();
+    drawEnemies();
     drawWindZones();
     drawParticles();
     drawDeathPieces();
@@ -3195,8 +3793,39 @@
         item[0].x = item[1];
         item[0].y = item[2];
       }
+
+      for (const item of savedEnemyPositions) {
+        item[0].x = item[1];
+        item[0].y = item[2];
+      }
     }
   }
+
+
+  // UYUM KONTROLÜ
+  // - Enemy RNG, patrol direction and patrol speed use STATE.rng().
+  // - Enemy patrol is restricted to the middle ~44% of its host platform.
+  // - Revive platform and tutorial/start platform set noEnemy=true.
+  // - Only NORMAL/MOVING platforms can spawn enemies.
+  // - Max 6 active enemies.
+  // - Normal contact with an unsquashed enemy is deadly.
+  // - ArrowDown triggers the same flick-stomp action on desktop.
+  // - Existing 1:1 pointer controls are untouched.
+  // - Existing pooled particles and AudioSys voices are reused.
+  // - Ghost Race is not present in this source; STATE.setRunSeed(seed) is
+  //   exposed so a ghost/replay can reproduce the exact enemy RNG stream.
+
+
+  // PHASE-2
+  // TESLİM SONRASI KONTROLÜ
+  // [x] Platform width distribution restored to the wider 88..154 formula.
+  // [x] Enemy patrol uses only the middle ~40%; platform width is untouched.
+  // [x] Normal landing does not call enemy squash logic.
+  // [x] Down flick uses Y samples only and never writes horizontal input state.
+  // [x] Flick outside enemy range has no penalty.
+  // [x] ArrowDown triggers the same flick action on desktop.
+  // [x] Normal contact with an active enemy causes death.
+  // [x] ParticleSys, platforms, AudioSys, MusicSys, Enemy and WindParticleSys remain defined.
 
   // ============================================================
   // 14) GAME LOOP
@@ -3261,6 +3890,13 @@
     // Store the new finger position only as a drag reference.
     INPUT.lastPointerX = pointerToGameX(e.clientX);
 
+    // PHASE-1 — initialize independent Y-only flick history.
+    INPUT.flickSamples.length = 0;
+    INPUT.flickSamples.push({
+      y: e.clientY,
+      t: Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now()
+    });
+
     canvas.setPointerCapture?.(e.pointerId);
   });
 
@@ -3279,6 +3915,9 @@
       PLAYER.radius,
       W - PLAYER.radius
     );
+
+    // PHASE-1 — parallel signal only. This never writes pointerX/targetX.
+    recordFlickSample(e.clientY, e.timeStamp);
   });
 
   function endPointer(e) {
@@ -3286,6 +3925,7 @@
     INPUT.active = false;
     INPUT.pointerId = null;
     INPUT.lastPointerX = 0;
+    INPUT.flickSamples.length = 0;
   }
 
   canvas.addEventListener("pointerup", endPointer);
@@ -3305,6 +3945,12 @@
     }
     if (e.code === "ArrowRight" || e.code === "KeyD") {
       INPUT.keyboardDir = 1;
+      e.preventDefault();
+    }
+
+    // Desktop: ArrowDown fires the exact same stomp signal as a mobile flick.
+    if (e.code === "ArrowDown") {
+      if (!e.repeat) triggerDownFlick();
       e.preventDefault();
     }
   }, { passive: false });
