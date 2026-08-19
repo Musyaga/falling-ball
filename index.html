@@ -615,15 +615,16 @@
       // Slight mobile-only forgiveness around enemies.
       flickEnemyRangeMul: IS_MOBILE ? 6.0 : 4.0,
 
-      // Smooth intent detector: accumulate only downward travel.
+      // Desktop swipe detector remains defined for compatibility.
       mobileSwipeTravel: 13,
       mobileSwipeMaxMs: 320,
       mobileSwipeVelocity: 260,
       mobileAccumTravel: 16,
 
-      // Mobile accessibility: a clean short tap also triggers stomp.
+      // Mobile gameplay uses a clean short tap for stomp.
       mobileTapMaxMs: 230,
-      mobileTapMaxMove: 12
+      mobileTapMaxMove: 10,
+      mobileDragLockMove: 11
     }
   };
 
@@ -644,6 +645,7 @@
     pointerStartClientX: 0,
     pointerStartClientY: 0,
     suppressTapStomp: false,
+    mobileGestureIsDrag: false,
     flickAccumDown: 0,
     flickLastY: 0,
     flickSmoothedVY: 0,
@@ -4939,6 +4941,7 @@
     INPUT.pointerStartClientX = e.clientX;
     INPUT.pointerStartClientY = e.clientY;
     INPUT.suppressTapStomp = startedInTutorial;
+    INPUT.mobileGestureIsDrag = false;
     INPUT.flickAccumDown = 0;
     INPUT.flickLastY = e.clientY;
     INPUT.flickSmoothedVY = 0;
@@ -4957,6 +4960,16 @@
     const deltaX = currentX - INPUT.lastPointerX;
     INPUT.lastPointerX = currentX;
 
+    // MOBILE: once the finger moves meaningfully, this gesture becomes
+    // a movement drag and can no longer trigger stomp on release.
+    if (IS_MOBILE && !INPUT.mobileGestureIsDrag) {
+      const totalDx = e.clientX - INPUT.pointerStartClientX;
+      const totalDy = e.clientY - INPUT.pointerStartClientY;
+      if (Math.hypot(totalDx, totalDy) >= CONFIG.controls.mobileDragLockMove) {
+        INPUT.mobileGestureIsDrag = true;
+      }
+    }
+
     // Faster drag response while preserving relative-drag behavior:
     // touching again never teleports the ball.
     const DRAG_SENSITIVITY = 1.42;
@@ -4966,8 +4979,11 @@
       W - PLAYER.radius
     );
 
-    // PHASE-1 — parallel signal only. This never writes pointerX/targetX.
-    recordFlickSample(e.clientY, e.timeStamp);
+    // Desktop keeps the original flick detector.
+    // Mobile uses tap-only stomp to prevent accidental activation while dragging.
+    if (!IS_MOBILE) {
+      recordFlickSample(e.clientY, e.timeStamp);
+    }
 
   });
 
@@ -4977,12 +4993,13 @@
     const now = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
     const dtMs = Math.max(1, now - INPUT.flickStartTime);
 
-    // MOBILE ONLY — a clean single tap is a stomp.
-    // A drag is not: total finger movement must stay inside a small radius.
+    // MOBILE ONLY — stomp is now TAP-ONLY.
+    // If the gesture ever became a drag, it is guaranteed not to stomp.
     if (
       IS_MOBILE &&
       STATE.mode === MODE.PLAYING &&
       !INPUT.suppressTapStomp &&
+      !INPUT.mobileGestureIsDrag &&
       !INPUT.flickTriggeredForPointer
     ) {
       const tapDx = e.clientX - INPUT.pointerStartClientX;
@@ -5000,27 +5017,13 @@
       }
     }
 
-    // Existing mobile downward-swipe fallback remains available.
-    if (IS_MOBILE && !INPUT.flickTriggeredForPointer) {
-      const dy = e.clientY - INPUT.flickStartY;
-
-      if (
-        dy >= 16 &&
-        dtMs <= 360 &&
-        now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs
-      ) {
-        INPUT.flickTriggeredForPointer = true;
-        INPUT.lastFlickAt = now;
-        triggerDownFlick();
-      }
-    }
-
     INPUT.active = false;
     INPUT.pointerId = null;
     INPUT.lastPointerX = 0;
     INPUT.flickSamples.length = 0;
     INPUT.flickTriggeredForPointer = false;
     INPUT.suppressTapStomp = false;
+    INPUT.mobileGestureIsDrag = false;
     INPUT.flickAccumDown = 0;
     INPUT.flickSmoothedVY = 0;
   }
