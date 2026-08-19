@@ -564,7 +564,13 @@
     themeToIndex: 0,
     themeTransition: 1,
     tutorialTime: 0,
-    flickHintTimer: 0
+    flickHintTimer: 0,
+
+    // PHASE-1 — first visible enemy contextual hint.
+    hasSeenEnemyHint: localStorage.getItem("paperFallEnemyHintSeen") === "1",
+    enemyHintTimer: 0,
+    enemyHintDuration: 1.9,
+    enemyHintEnemyId: null
   };
 
   const PLAYER = {
@@ -575,6 +581,7 @@
 
     radius: IS_MOBILE ? 17 : 16,
     vy: 0,
+    vx: 0,
 
     gravity: 1580,
     jumpVelocity: 635,
@@ -753,6 +760,10 @@
     },
 
     land() { this.blip(180, 0.055, 0.17); },
+    contact() {
+      this.blip(235, 0.045, 0.10, "triangle");
+      setTimeout(() => this.blip(185, 0.04, 0.065, "sine"), 22);
+    },
     perfect() {
       this.blip(620, 0.07, 0.20);
       setTimeout(() => this.blip(820, 0.06, 0.16), 45);
@@ -1281,6 +1292,7 @@
       this.active = true;
       this.squashed = false;
       this.squashTimer = 0;
+      this.contactCooldownUntil = 0;
       this.squashDuration = 0.42;
       this.burnSeed = STATE.rng() * 1000;
       this.age = STATE.rng() * 3;
@@ -1353,6 +1365,32 @@
 
   function updateEnemies(dt) {
     for (const enemy of STATE.enemies) enemy.update(dt);
+
+    // PHASE-1 — show the hint only when an enemy becomes genuinely visible.
+    // Pre-generated off-screen enemies do not consume the one-time hint.
+    if (!STATE.hasSeenEnemyHint) {
+      for (const enemy of STATE.enemies) {
+        if (
+          enemy.active &&
+          !enemy.squashed &&
+          enemy.y + enemy.radius >= 34 &&
+          enemy.y - enemy.radius <= H - 28
+        ) {
+          STATE.hasSeenEnemyHint = true;
+          STATE.enemyHintEnemyId = enemy.id;
+          STATE.enemyHintTimer = STATE.enemyHintDuration;
+          localStorage.setItem("paperFallEnemyHintSeen", "1");
+          break;
+        }
+      }
+    }
+
+    if (STATE.enemyHintTimer > 0) {
+      STATE.enemyHintTimer = Math.max(0, STATE.enemyHintTimer - dt);
+      if (STATE.enemyHintTimer <= 0) {
+        STATE.enemyHintEnemyId = null;
+      }
+    }
 
     const livingPlatformIds = new Set(
       STATE.platforms.filter(p => !p.broken).map(p => p.id)
@@ -1770,6 +1808,7 @@
     PLAYER.y = IS_MOBILE ? Math.min(H * 0.27, 300) : H * 0.32;
     PLAYER.prevY = PLAYER.y;
     PLAYER.vy = 0;
+    PLAYER.vx = 0;
     PLAYER.alive = true;
     PLAYER.windOffset = 0;
     PLAYER.windVX = 0;
@@ -2215,6 +2254,13 @@
     // keyboard yalnızca desktop test kolaylığı içindir.
     if (!INPUT.active && INPUT.keyboardDir !== 0) {
       PLAYER.targetX += INPUT.keyboardDir * INPUT.keyboardSpeed * dt;
+    }
+
+    // Short horizontal recoil from non-lethal microbe contact.
+    if (Math.abs(PLAYER.vx) > 0.01) {
+      PLAYER.targetX += PLAYER.vx * dt;
+      PLAYER.vx *= Math.exp(-dt / 0.15);
+      if (Math.abs(PLAYER.vx) < 2) PLAYER.vx = 0;
     }
 
     PLAYER.targetX = clamp(
@@ -2673,8 +2719,8 @@
     // No enemy in range => still perform the short dive, with no score penalty.
   }
 
-  function checkEnemyContactDeath() {
-    if (STATE.mode !== MODE.PLAYING) return false;
+  function checkEnemyContact() {
+    if (STATE.mode !== MODE.PLAYING) return;
 
     for (const enemy of STATE.enemies) {
       if (!enemy.active || enemy.squashed) continue;
@@ -2682,29 +2728,77 @@
       const dx = PLAYER.x - enemy.x;
       const dy = PLAYER.y - enemy.y;
 
-      // Slightly forgiving circular body overlap.
       const hitRadius = PLAYER.radius + enemy.radius * 0.88;
-      if (dx * dx + dy * dy <= hitRadius * hitRadius) {
-        const stompActive =
-          INPUT.stompDashActive &&
-          PLAYER.vy > 0 &&
-          PLAYER.y <= enemy.y + enemy.radius * 0.7;
+      if (dx * dx + dy * dy > hitRadius * hitRadius) continue;
 
-        if (stompActive) {
-          INPUT.stompDashActive = false;
-          INPUT.stompDashTimer = 0;
-          INPUT.stompFragileBroken = false;
-          INPUT.stompTargetId = null;
-          squashEnemy(enemy);
-          return false;
-        }
+      const stompActive =
+        INPUT.stompDashActive &&
+        PLAYER.vy > 0 &&
+        PLAYER.y <= enemy.y + enemy.radius * 0.7;
 
-        beginDeath("You touched a microbe.");
-        return true;
+      // Successful stomp remains unchanged.
+      if (stompActive) {
+        INPUT.stompDashActive = false;
+        INPUT.stompDashTimer = 0;
+        INPUT.stompFragileBroken = false;
+        INPUT.stompTargetId = null;
+        squashEnemy(enemy);
+        return;
       }
-    }
 
-    return false;
+      // Normal microbe contact is non-lethal.
+      if (STATE.time < (enemy.contactCooldownUntil || 0)) {
+        continue;
+      }
+      enemy.contactCooldownUntil = STATE.time + 0.30;
+
+      let pushDir = Math.sign(dx);
+      if (pushDir === 0) {
+        pushDir = Math.sign(PLAYER.visualVX) || -enemy.patrolDir || 1;
+      }
+
+      // Small bounce-back away from the microbe.
+      PLAYER.vx = pushDir * 185;
+      PLAYER.targetX = clamp(
+        PLAYER.targetX + pushDir * 5,
+        PLAYER.radius,
+        W - PLAYER.radius
+      );
+
+      // Avoid sticky overlap without giving stomp-height bounce.
+      if (PLAYER.vy > 40) {
+        PLAYER.vy = Math.min(PLAYER.vy, 150);
+      }
+
+      // Miss-level penalty only: combo is lost, run continues.
+      STATE.combo = 0;
+      STATE.multiplier = 1;
+      updateHUD();
+
+      // Neutral contact particles, clearly different from stomp effect.
+      ParticleSys.spawn(
+        enemy.x + pushDir * enemy.radius * 0.45,
+        enemy.y - enemy.radius * 0.10,
+        {
+          count: 7,
+          color: "#b8b5a7",
+          speedMin: 18,
+          speedMax: 58,
+          lift: 18,
+          lifeMin: 0.16,
+          lifeMax: 0.30,
+          sizeMin: 1.2,
+          sizeMax: 2.6
+        }
+      );
+
+      PLAYER.squash = Math.max(PLAYER.squash, 0.08);
+      STATE.impactShake = Math.max(STATE.impactShake, 0.45);
+      AudioSys.contact();
+
+      // One reaction per frame is enough.
+      return;
+    }
   }
 
   function recordFlickSample(clientY, timeStamp) {
@@ -2954,13 +3048,9 @@
 
     sweptPlatformCollision();
 
-    // Normal contact with a living microbe is deadly.
-    // Flick-squashed enemies are inactive and ignored here.
-    if (checkEnemyContactDeath()) {
-      updateParticles(dt);
-      updatePopups(dt);
-      return;
-    }
+    // Living microbe contact is now non-lethal.
+    // Stomp still destroys the microbe; normal contact only recoils + resets combo.
+    checkEnemyContact();
 
     if (STATE.mode !== MODE.PLAYING) {
       updateParticles(dt);
@@ -4225,6 +4315,269 @@
   }
 
 
+
+  // PHASE-0 — FLICK-EZME + KIRILABİLİR PLATFORM TUTORIAL MINI DEMOSU
+  function drawTutorialStompDemo() {
+    if (STATE.mode !== MODE.TUTORIAL) return;
+
+    const T = mixedTheme();
+
+    // 2.35 second loop:
+    // 0.00–0.38 wait
+    // 0.38–0.70 finger swipe + dive
+    // 0.62–0.88 fragile platform shatters
+    // 0.88–1.06 ball continues through and stomps enemy
+    // 1.06–1.38 particles/+50
+    // 1.38–2.35 pause/reset
+    const loop = STATE.tutorialTime % 2.35;
+
+    const panelW = IS_MOBILE ? 132 : 144;
+    const panelH = IS_MOBILE ? 170 : 176;
+    const panelX = W * 0.5 - panelW * 0.5;
+    const desiredY = PLAYER.y + (IS_MOBILE ? 230 : 222);
+    const panelY = Math.min(H - panelH - 18, desiredY);
+
+    ctx.save();
+
+    // Distinct bonus panel so movement and stomp controls are not confused.
+    ctx.globalAlpha = 0.94;
+    ctx.fillStyle = T.panel || "rgba(255,255,255,.76)";
+    ctx.strokeStyle = T.text;
+    ctx.lineWidth = 1.8;
+    roundRectPath(panelX, panelY, panelW, panelH, 12);
+    ctx.fill();
+    ctx.globalAlpha = 0.40;
+    ctx.stroke();
+
+    ctx.globalAlpha = 0.82;
+    ctx.fillStyle = T.text;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("BONUS:", panelX + 10, panelY + 13);
+
+    ctx.textAlign = "center";
+    ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("FLICK = BREAK + STOMP", panelX + panelW * 0.5, panelY + 28);
+
+    const cx = panelX + panelW * 0.5;
+    const fragileY = panelY + 92;
+    const enemyPlatformY = panelY + panelH - 23;
+    const enemyY = enemyPlatformY - 10;
+
+    // Bottom solid platform with enemy.
+    ctx.globalAlpha = 0.88;
+    ctx.fillStyle = T.platform || "#d8d0be";
+    ctx.strokeStyle = T.text;
+    ctx.lineWidth = 1.5;
+    roundRectPath(cx - 39, enemyPlatformY, 78, 8, 4);
+    ctx.fill();
+    ctx.globalAlpha = 0.35;
+    ctx.stroke();
+
+    // Timeline helpers.
+    const diveT = clamp((loop - 0.38) / 0.68, 0, 1);
+    const swipeT = clamp((loop - 0.38) / 0.32, 0, 1);
+    const fragileT = clamp((loop - 0.62) / 0.28, 0, 1);
+    const stompT = clamp((loop - 0.88) / 0.18, 0, 1);
+    const scoreT = clamp((loop - 1.06) / 0.32, 0, 1);
+
+    const fragileBroken = loop >= 0.70 && loop < 2.10;
+    const enemyGone = loop >= 0.98 && loop < 2.10;
+
+    // Fragile platform before the enemy.
+    if (!fragileBroken) {
+      ctx.globalAlpha = 0.92;
+      ctx.fillStyle = "#d8c58f";
+      ctx.strokeStyle = "#6e6045";
+      ctx.lineWidth = 1.4;
+      roundRectPath(cx - 34, fragileY, 68, 7, 3);
+      ctx.fill();
+      ctx.stroke();
+
+      // visible crack marks
+      ctx.strokeStyle = "#78684b";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(cx - 7, fragileY + 1);
+      ctx.lineTo(cx - 2, fragileY + 4);
+      ctx.lineTo(cx + 2, fragileY + 1);
+      ctx.moveTo(cx + 12, fragileY + 1);
+      ctx.lineTo(cx + 8, fragileY + 5);
+      ctx.stroke();
+    } else {
+      // Broken fragile pieces falling away while ball passes through.
+      for (let i = 0; i < 6; i++) {
+        const side = i < 3 ? -1 : 1;
+        const idx = i % 3;
+        const px = cx + side * (10 + idx * 8 + fragileT * (8 + idx * 3));
+        const py = fragileY + 3 + fragileT * (7 + idx * 5);
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(side * (0.20 + idx * 0.18) + fragileT * side * 0.8);
+        ctx.globalAlpha = clamp(1 - fragileT * 0.85, 0, 1) * 0.90;
+        ctx.fillStyle = "#d8c58f";
+        ctx.strokeStyle = "#6e6045";
+        ctx.lineWidth = 1;
+        ctx.fillRect(-5, -2, 10, 4);
+        ctx.strokeRect(-5, -2, 10, 4);
+        ctx.restore();
+      }
+
+      // Dust from the fragile platform.
+      for (let i = 0; i < 8; i++) {
+        const a = i * (TAU / 8);
+        const d = 4 + fragileT * (10 + (i % 3) * 2);
+        ctx.globalAlpha = clamp(1 - fragileT, 0, 1) * 0.46;
+        ctx.fillStyle = "#b7a77e";
+        ctx.beginPath();
+        ctx.arc(
+          cx + Math.cos(a) * d,
+          fragileY + 3 + Math.sin(a) * d * 0.45,
+          1.1 + (i % 2) * 0.5,
+          0,
+          TAU
+        );
+        ctx.fill();
+      }
+    }
+
+    // Mini enemy icon.
+    if (!enemyGone) {
+      const er = 10;
+
+      ctx.globalAlpha = 0.96;
+      ctx.fillStyle = "#6f8f65";
+      ctx.strokeStyle = "#2b3030";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.ellipse(cx, enemyY, er * 0.92, er * 0.76, 0, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.strokeStyle = "#516d4d";
+      ctx.lineWidth = 1.3;
+      for (let i = -1; i <= 1; i++) {
+        ctx.beginPath();
+        ctx.moveTo(cx + i * 5, enemyY - 6);
+        ctx.lineTo(cx + i * 6.5, enemyY - 12);
+        ctx.stroke();
+
+        ctx.fillStyle = "#7b638d";
+        ctx.beginPath();
+        ctx.arc(cx + i * 6.5, enemyY - 12, 1.6, 0, TAU);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = "#765f8b";
+      ctx.beginPath();
+      ctx.arc(cx - 5.2, enemyY + 2.5, 2.2, 0, TAU);
+      ctx.arc(cx + 5.5, enemyY + 1.0, 1.8, 0, TAU);
+      ctx.fill();
+
+      ctx.fillStyle = "#fffdf3";
+      ctx.beginPath();
+      ctx.arc(cx - 3.2, enemyY - 2.0, 2.3, 0, TAU);
+      ctx.arc(cx + 3.2, enemyY - 2.0, 2.3, 0, TAU);
+      ctx.fill();
+
+      ctx.fillStyle = "#24282a";
+      ctx.beginPath();
+      ctx.arc(cx - 3.0, enemyY - 1.8, 0.9, 0, TAU);
+      ctx.arc(cx + 3.4, enemyY - 1.8, 0.9, 0, TAU);
+      ctx.fill();
+    }
+
+    // Ball waits, then dives THROUGH fragile and reaches enemy.
+    let ballY = panelY + 51;
+    if (loop >= 0.38 && loop < 1.06) {
+      const eased = diveT * diveT * (3 - 2 * diveT);
+      ballY = lerp(panelY + 51, enemyY - 17, eased);
+    } else if (loop >= 1.06 && loop < 1.34) {
+      ballY = enemyY - 17;
+    }
+
+    if (loop < 1.34) {
+      ctx.globalAlpha = 0.98;
+      ctx.fillStyle = T.player;
+      ctx.strokeStyle = T.playerStroke;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(cx, ballY, 7.2, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      if (loop >= 0.38) {
+        ctx.strokeStyle = "#26302c";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.moveTo(cx - 4.2, ballY - 2.4);
+        ctx.lineTo(cx - 1.0, ballY - 1.0);
+        ctx.moveTo(cx + 4.2, ballY - 2.4);
+        ctx.lineTo(cx + 1.0, ballY - 1.0);
+        ctx.stroke();
+      }
+    }
+
+    // Finger demonstrates the quick downward gesture.
+    if (loop >= 0.38 && loop < 0.78) {
+      const fingerX = cx + 31;
+      const fingerY = lerp(panelY + 48, panelY + 82, swipeT);
+
+      ctx.globalAlpha = 0.80;
+      ctx.strokeStyle = T.text;
+      ctx.fillStyle = T.bg || "#f5f1e8";
+      ctx.lineWidth = 1.8;
+
+      ctx.beginPath();
+      ctx.arc(fingerX, fingerY, 6.3, 0, TAU);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(fingerX, fingerY + 5);
+      ctx.lineTo(fingerX, fingerY + 15);
+      ctx.stroke();
+
+      ctx.textAlign = "left";
+      ctx.font = "900 8px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+      ctx.fillStyle = T.text;
+      ctx.fillText("AŞAĞI ÇEK", fingerX - 20, panelY + 116);
+    }
+
+    // Enemy shatter particles after impact.
+    if (loop >= 0.94 && loop < 1.42) {
+      const burstT = clamp((loop - 0.94) / 0.34, 0, 1);
+      const fade = 1 - clamp((loop - 1.14) / 0.28, 0, 1);
+
+      for (let i = 0; i < 10; i++) {
+        const a = i * (TAU / 10) + 0.20;
+        const d = 4 + burstT * (14 + (i % 3) * 3);
+        ctx.globalAlpha = fade * 0.72;
+        ctx.fillStyle = i % 2 ? "#7b638d" : "#839b73";
+        ctx.beginPath();
+        ctx.arc(
+          cx + Math.cos(a) * d,
+          enemyY + Math.sin(a) * d * 0.55,
+          1.2 + (i % 3) * 0.5,
+          0,
+          TAU
+        );
+        ctx.fill();
+      }
+
+      if (loop >= 1.06) {
+        ctx.globalAlpha = fade * 0.95;
+        ctx.textAlign = "center";
+        ctx.fillStyle = T.text;
+        ctx.font = "900 12px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+        ctx.fillText("+50", cx, enemyY - 30 - scoreT * 7);
+      }
+    }
+
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
   function drawTutorial() {
     if (STATE.mode !== MODE.TUTORIAL) return;
 
@@ -4266,41 +4619,90 @@
     ctx.font = "900 20px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.fillText("DRAG", W * 0.5, y + 38);
 
-    // Flick tutorial: short downward arrow and label.
+    // Standalone FLICK DOWN arrow removed.
+    // The bonus action is taught only by the animated mini demo below.
     const fy = y + 82;
-    ctx.globalAlpha = pulse * 0.95;
-    ctx.lineWidth = 3.2;
-    ctx.beginPath();
-    ctx.moveTo(W * 0.5, fy - 14);
-    ctx.lineTo(W * 0.5, fy + 18);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(W * 0.5, fy + 18);
-    ctx.lineTo(W * 0.5 - 9, fy + 7);
-    ctx.moveTo(W * 0.5, fy + 18);
-    ctx.lineTo(W * 0.5 + 9, fy + 7);
-    ctx.stroke();
-
-    ctx.font = "900 15px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
-    ctx.fillText("FLICK DOWN = STOMP", W * 0.5, fy + 43);
 
     ctx.font = "900 11px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.globalAlpha = 0.68;
-    ctx.fillText("BREAK FRAGILE • HIT CREATURES", W * 0.5, fy + 63);
+    ctx.fillText("BREAK FRAGILE • HIT CREATURES", W * 0.5, fy + 8);
 
     if (IS_MOBILE) {
       ctx.globalAlpha = 0.70;
-      ctx.fillText("OR TAP THE STOMP BUTTON", W * 0.5, fy + 80);
+      ctx.fillText("OR TAP THE STOMP BUTTON", W * 0.5, fy + 25);
       ctx.globalAlpha = 0.72;
-      ctx.fillText("TAP TO START", W * 0.5, fy + 100);
+      ctx.fillText("TAP TO START", W * 0.5, fy + 45);
     } else {
       ctx.globalAlpha = 0.72;
-      ctx.fillText("TAP TO START", W * 0.5, fy + 88);
+      ctx.fillText("TAP TO START", W * 0.5, fy + 34);
     }
 
     ctx.restore();
+
+    // PHASE-0 — distinct looping bonus-action demonstration.
+    drawTutorialStompDemo();
   }
 
+
+
+  // PHASE-1 — ONE-TIME FIRST ENEMY CONTEXTUAL HINT
+  function drawEnemyContextHint() {
+    if (
+      STATE.mode !== MODE.PLAYING ||
+      STATE.enemyHintTimer <= 0 ||
+      STATE.enemyHintEnemyId == null
+    ) return;
+
+    const enemy = STATE.enemies.find(e =>
+      e.id === STATE.enemyHintEnemyId &&
+      e.active &&
+      !e.squashed
+    );
+    if (!enemy) return;
+
+    const T = mixedTheme();
+    const elapsed = STATE.enemyHintDuration - STATE.enemyHintTimer;
+    const fadeIn = clamp(elapsed / 0.18, 0, 1);
+    const fadeOut = clamp(STATE.enemyHintTimer / 0.48, 0, 1);
+    const alpha = Math.min(fadeIn, fadeOut);
+
+    const bob = Math.sin(STATE.time * 5.2) * 2;
+    const bx = clamp(enemy.x, 54, W - 54);
+    const by = Math.max(48, enemy.y - enemy.radius - 31 + bob);
+
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.94;
+
+    // Bubble
+    ctx.fillStyle = T.panel || "rgba(255,255,255,.88)";
+    ctx.strokeStyle = T.text;
+    ctx.lineWidth = 1.8;
+    roundRectPath(bx - 47, by - 15, 94, 28, 9);
+    ctx.fill();
+    ctx.globalAlpha = alpha * 0.38;
+    ctx.stroke();
+
+    // Bubble tail pointing to the enemy
+    ctx.globalAlpha = alpha * 0.94;
+    ctx.fillStyle = T.panel || "rgba(255,255,255,.88)";
+    ctx.strokeStyle = T.text;
+    ctx.beginPath();
+    ctx.moveTo(bx - 6, by + 12);
+    ctx.lineTo(bx + 6, by + 12);
+    ctx.lineTo(enemy.x, Math.max(by + 18, enemy.y - enemy.radius - 3));
+    ctx.closePath();
+    ctx.fill();
+
+    // Down-arrow + text
+    ctx.fillStyle = T.text;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "900 11px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("AŞAĞI ÇEK!", bx, by - 1);
+
+    // No standalone down-arrow icon here; text + tutorial animation are enough.
+    ctx.restore();
+  }
 
   function drawFlickHint() {
     if (
@@ -4325,23 +4727,13 @@
     const x = W * 0.5;
     const y = H * 0.22;
 
-    ctx.beginPath();
-    ctx.moveTo(x, y - 18);
-    ctx.lineTo(x, y + 12);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x, y + 12);
-    ctx.lineTo(x - 8, y + 3);
-    ctx.moveTo(x, y + 12);
-    ctx.lineTo(x + 8, y + 3);
-    ctx.stroke();
-
-    ctx.font = "900 14px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
-    ctx.fillText("FLICK DOWN TO STOMP", x, y + 34);
+    // Standalone down-arrow icon removed; animation teaches the gesture.
+    ctx.font = "900 13px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("STOMP BONUS", x, y + 20);
 
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.globalAlpha = a * 0.58;
-    ctx.fillText(IS_MOBILE ? "↓ FAST SWIPE OR TAP STOMP" : "↓ FAST SWIPE", x, y + 52);
+    ctx.fillText(IS_MOBILE ? "SWIPE OR TAP STOMP" : "USE STOMP", x, y + 38);
 
     ctx.restore();
   }
@@ -4401,6 +4793,7 @@
     drawDeathPieces();
     drawPlayer();
     drawTutorial();
+    drawEnemyContextHint();
     drawFlickHint();
     drawStompButton();
     drawPopups();
