@@ -546,7 +546,7 @@
     prevX: W * 0.5,
     prevY: H * 0.34,
 
-    radius: 20,
+    radius: 16,
     vy: 0,
 
     gravity: 1580,
@@ -1132,7 +1132,7 @@
       prevY: y,
 
       w,
-      h: 18,
+      h: 15,
 
       moveDir: Math.random() < 0.5 ? -1 : 1,
       moveSpeed: 65 + Math.random() * 45,
@@ -1175,8 +1175,8 @@
   function chooseReachableGap() {
     // Faster bounce needs platforms to arrive sooner, but still keep
     // enough vertical breathing room to avoid crowding.
-    const minGap = 118;
-    const maxGap = 156;
+    const minGap = 110;
+    const maxGap = 148;
 
     // Still validate each new platform against the CURRENT scroll speed.
     for (let attempt = 0; attempt < 24; attempt++) {
@@ -1188,7 +1188,7 @@
       }
     }
 
-    return 138;
+    return 132;
   }
 
   function spawnNextPlatform() {
@@ -1202,7 +1202,7 @@
     const gap = chooseReachableGap();
     const y = baseY + gap;
 
-    const w = 88 + Math.random() * 66;
+    const w = 70 + Math.random() * 60;
     const x = 20 + Math.random() * (W - w - 40);
     const type = choosePlatformType();
 
@@ -1214,7 +1214,7 @@
     STATE.lastTypes.length = 0;
     STATE.nextPlatformId = 1;
 
-    const startW = 150;
+    const startW = 120;
     const startY = IS_MOBILE ? Math.min(H * 0.58, 610) : H * 0.66;
     STATE.platforms.push(
       createPlatform(TYPE.NORMAL, W * 0.5 - startW * 0.5, startY, startW)
@@ -1638,7 +1638,7 @@
       p.y < safeY - 150 || p.y > safeY + 150
     );
 
-    const safeW = 180;
+    const safeW = 150;
     const safeX = clamp(W * 0.5 - safeW * 0.5, 18, W - safeW - 18);
     const safePlatform = createPlatform(TYPE.NORMAL, safeX, safeY, safeW);
     safePlatform.perfectGranted = true;
@@ -1760,10 +1760,10 @@
 
       // Subtle physically-inspired platform response:
       // spring back from landings and side bumps.
-      p.wobbleVel += (-p.wobble * 52 - p.wobbleVel * 10.5) * dt;
+      p.wobbleVel += (-p.wobble * 46 - p.wobbleVel * 8.8) * dt;
       p.wobble += p.wobbleVel * dt;
 
-      p.bounceVel += (-p.bounce * 86 - p.bounceVel * 15) * dt;
+      p.bounceVel += (-p.bounce * 76 - p.bounceVel * 12.8) * dt;
       p.bounce += p.bounceVel * dt;
 
       if (p.type === TYPE.FRAGILE && p.fragileTriggered && !p.broken) {
@@ -1996,9 +1996,9 @@
           PLAYER.x = p.x + p.w + radius + skin;
         }
 
-        // Side bump gives the platform a tiny reactive wobble.
-        p.wobbleVel += best.nx * -5.5;
-        p.bounceVel += 1.2;
+        // Side bump gives the platform a visible but controlled wobble.
+        p.wobbleVel += best.nx * -8.0;
+        p.bounceVel += 1.8;
 
         PLAYER.targetX = PLAYER.x;
         PLAYER.prevX = PLAYER.x;
@@ -2021,8 +2021,8 @@
         PLAYER.lastBouncePlatformId = p.id;
 
         p.impact = clamp(incomingSpeed / 760, 0.18, 0.72);
-        p.bounceVel += clamp(incomingSpeed / 300, 0.9, 3.0);
-        p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 4.6;
+        p.bounceVel += clamp(incomingSpeed / 260, 1.2, 4.0);
+        p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 6.2;
 
         PLAYER.squash = clamp(incomingSpeed / 820, 0.14, 0.42);
         PLAYER.stretch = -0.04;
@@ -2116,8 +2116,8 @@
           PLAYER.y = p.y - radius;
           if (PLAYER.vy > 0) PLAYER.vy = -PLAYER.jumpVelocity;
           PLAYER.lastBouncePlatformId = p.id;
-          p.bounceVel += 0.9;
-          p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 2.8;
+          p.bounceVel += 1.25;
+          p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 3.8;
         } else {
           PLAYER.y = p.y + p.h + radius + skin;
           if (PLAYER.vy < 0) PLAYER.vy = 0;
@@ -2400,9 +2400,9 @@
     for (const p of STATE.platforms) {
       if (p.broken) continue;
 
-      const visualSink = p.impact * 3.5;
-      const tilt = clamp(p.wobble * 0.06, -0.09, 0.09);
-      const bounceY = p.bounce * 1.8 + visualSink;
+      const visualSink = p.impact * 4.2;
+      const tilt = clamp(p.wobble * 0.09, -0.14, 0.14);
+      const bounceY = p.bounce * 2.5 + visualSink;
       const cx = p.x + p.w * 0.5;
       const cy = p.y + p.h * 0.5;
 
@@ -2480,8 +2480,8 @@
     for (const p of STATE.platforms) {
       if (p.type !== TYPE.SPIKE || p.broken) continue;
 
-      const tilt = clamp(p.wobble * 0.06, -0.09, 0.09);
-      const bounceY = p.bounce * 1.6;
+      const tilt = clamp(p.wobble * 0.09, -0.14, 0.14);
+      const bounceY = p.bounce * 2.2;
       const cx = p.x + p.w * 0.5;
       const cy = p.y + p.h * 0.5;
 
