@@ -596,10 +596,15 @@
   // FLICK İLE EZME — sadece dikey pointer hareketini izler.
   const CONFIG = {
     controls: {
-      flickThreshold: 1050,   // CSS px / second, downward is positive
-      flickWindowMs: 135,
-      flickMinTravel: 24,
-      flickCooldownMs: 180
+      // Desktop keeps the firmer flick.
+      // Mobile is intentionally more forgiving because thumb travel is shorter.
+      flickThreshold: IS_MOBILE ? 720 : 1050,
+      flickWindowMs: IS_MOBILE ? 175 : 135,
+      flickMinTravel: IS_MOBILE ? 17 : 24,
+      flickCooldownMs: 180,
+
+      // Slight mobile-only forgiveness around enemies.
+      flickEnemyRangeMul: IS_MOBILE ? 5.0 : 4.0
     }
   };
 
@@ -1422,8 +1427,8 @@
   // PLATFORM GENİŞLİĞİ REGRESYONU DÜZELTMESİ
   // Enemy sistemi platform genişliğini ASLA değiştirmez.
   // Geniş platform dağılımı korunur: 88 <= w < 154.
-  const PLATFORM_WIDTH_MIN = IS_MOBILE ? 108 : 88;
-  const PLATFORM_WIDTH_RANGE = IS_MOBILE ? 84 : 66;
+  const PLATFORM_WIDTH_MIN = IS_MOBILE ? 104 : 88;
+  const PLATFORM_WIDTH_RANGE = IS_MOBILE ? 80 : 66;
 
   function spawnNextPlatform() {
     // Batch yok: her çağrıda SADECE 1 platform.
@@ -1456,7 +1461,7 @@
     STATE.nextEnemyId = 1;
     STATE.enemyPlatformsUntilNext = 7 + Math.floor(STATE.rng() * 11);
 
-    const startW = IS_MOBILE ? 178 : 150;
+    const startW = IS_MOBILE ? 172 : 150;
     const startY = IS_MOBILE ? Math.min(H * 0.58, 610) : H * 0.66;
     const tutorialPlatform =
       createPlatform(TYPE.NORMAL, W * 0.5 - startW * 0.5, startY, startW);
@@ -1925,7 +1930,7 @@
       p.y < safeY - 150 || p.y > safeY + 150
     );
 
-    const safeW = IS_MOBILE ? 210 : 180;
+    const safeW = IS_MOBILE ? 202 : 180;
     const safeX = clamp(W * 0.5 - safeW * 0.5, 18, W - safeW - 18);
     const safePlatform = createPlatform(TYPE.NORMAL, safeX, safeY, safeW);
     safePlatform.perfectGranted = true;
@@ -2556,7 +2561,7 @@
   }
 
   function findEnemyInFlickRange() {
-    const range = PLAYER.radius * 4;
+    const range = PLAYER.radius * CONFIG.controls.flickEnemyRangeMul;
     let best = null;
     let bestDistSq = Infinity;
 
@@ -2599,7 +2604,7 @@
     PLAYER.vy = Math.max(PLAYER.vy, INPUT.stompDashSpeed);
 
     if (navigator.vibrate) {
-      try { navigator.vibrate(15); } catch (_) {}
+      try { navigator.vibrate(IS_MOBILE ? 22 : 15); } catch (_) {}
     }
 
     // No enemy in range => still perform the short dive, with no score penalty.
@@ -2655,19 +2660,45 @@
     const first = samples[0];
     const last = samples[samples.length - 1];
     const dtMs = last.t - first.t;
-    if (dtMs < 20) return;
+    if (dtMs < 16) return;
 
     const deltaY = last.y - first.y;
     const verticalVelocity = deltaY / (dtMs / 1000);
 
+    // Mobile assist: also inspect the newest ~70ms of movement.
+    // This catches a quick thumb snap even if the longer buffer contains
+    // a little sideways/slow setup movement first.
+    let shortDeltaY = deltaY;
+    let shortVelocity = verticalVelocity;
+
+    if (IS_MOBILE && samples.length >= 2) {
+      let shortFirst = samples[0];
+      for (let i = samples.length - 1; i >= 0; i--) {
+        if (last.t - samples[i].t <= 72) {
+          shortFirst = samples[i];
+        } else {
+          break;
+        }
+      }
+
+      const shortDt = Math.max(16, last.t - shortFirst.t);
+      shortDeltaY = last.y - shortFirst.y;
+      shortVelocity = shortDeltaY / (shortDt / 1000);
+    }
+
     const cooldownReady =
       now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs;
 
-    if (
-      cooldownReady &&
+    const normalFlick =
       deltaY >= CONFIG.controls.flickMinTravel &&
-      verticalVelocity >= CONFIG.controls.flickThreshold
-    ) {
+      verticalVelocity >= CONFIG.controls.flickThreshold;
+
+    const mobileQuickFlick =
+      IS_MOBILE &&
+      shortDeltaY >= 13 &&
+      shortVelocity >= 760;
+
+    if (cooldownReady && (normalFlick || mobileQuickFlick)) {
       INPUT.lastFlickAt = now;
       samples.length = 0;
       samples.push({ y: clientY, t: now });
