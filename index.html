@@ -293,9 +293,10 @@
   const DPR = Math.min(window.devicePixelRatio || 1, 1.4);
   const IS_MOBILE = window.matchMedia("(max-width:700px)").matches;
 
-  // Keep the PC world width. On mobile only reveal more vertical world
-  // instead of stretching the PC artwork.
-  const W = 600;
+  // Desktop keeps the original 600-wide world.
+  // Mobile uses a slightly narrower logical world so the ball/platforms
+  // keep the same geometry but appear larger and clearer on the phone.
+  const W = IS_MOBILE ? 520 : 600;
   const mobileViewportW = Math.max(320, window.innerWidth);
   const mobileViewportH = Math.max(
     480,
@@ -498,6 +499,7 @@
     enemies: [],
     recentEnemyPlatforms: [],
     nextEnemyId: 1,
+    enemyPlatformsUntilNext: 7,
     runSeed: 0x51f15e3d,
     rngState: 0x51f15e3d,
     rng() {
@@ -615,6 +617,8 @@
     stompDashTimer: 0,
     stompDashDuration: 0.18,
     stompDashSpeed: 900,
+    stompDashActive: false,
+    stompFragileBroken: false,
     angryFaceTimer: 0,
     stompTargetId: null
   };
@@ -1216,14 +1220,14 @@
     constructor(platformRef) {
       this.id = STATE.nextEnemyId++;
       this.platformRef = platformRef;
-      this.radius = 11;
+      this.radius = 16;
 
       // PHASE-0 — enemy uses only the middle ~40% of the platform.
       // The platform itself is NEVER shortened for an enemy.
-      this.patrolMin = Math.max(this.radius + 8, platformRef.w * 0.30);
+      this.patrolMin = Math.max(this.radius + 7, platformRef.w * 0.31);
       this.patrolMax = Math.min(
-        platformRef.w - this.radius - 8,
-        platformRef.w * 0.70
+        platformRef.w - this.radius - 7,
+        platformRef.w * 0.69
       );
 
       if (this.patrolMax <= this.patrolMin) {
@@ -1292,29 +1296,20 @@
     if (!platform) return;
     if (platform.type !== TYPE.NORMAL && platform.type !== TYPE.MOVING) return;
     if (platform.noEnemy) return;
-    if (activeEnemyCount() >= 7) return;
+    if (activeEnemyCount() >= 8) return;
 
-    // Anti-streak stays, but enemies are intentionally more common now.
-    // Never allow 5 enemy-bearing eligible platforms consecutively.
-    const recent = STATE.recentEnemyPlatforms;
-    if (
-      recent.length >= 4 &&
-      recent[recent.length - 1] &&
-      recent[recent.length - 2] &&
-      recent[recent.length - 3] &&
-      recent[recent.length - 4]
-    ) {
-      recent.push(false);
-      if (recent.length > 4) recent.shift();
+    // Enemy cadence is platform-based instead of probability-based.
+    // After one enemy spawns, the next can appear only after 7–17
+    // eligible platforms have been generated.
+    if (STATE.enemyPlatformsUntilNext > 0) {
+      STATE.enemyPlatformsUntilNext--;
       return;
     }
 
-    const hasEnemy = STATE.rng() < 0.48;
-    recent.push(hasEnemy);
-    if (recent.length > 4) recent.shift();
-
-    if (!hasEnemy) return;
     STATE.enemies.push(new Enemy(platform));
+
+    // Deterministic 7–17 platform gap using STATE.rng().
+    STATE.enemyPlatformsUntilNext = 7 + Math.floor(STATE.rng() * 11);
   }
 
   function updateEnemies(dt) {
@@ -1328,10 +1323,16 @@
       if (!enemy.platformRef || !livingPlatformIds.has(enemy.platformRef.id)) {
         return false;
       }
+
       if (enemy.squashed) {
         return enemy.squashTimer < enemy.squashDuration;
       }
-      return enemy.active && enemy.y < H + 100 && enemy.y > -120;
+
+      // IMPORTANT: keep enemies that are still below the screen.
+      // Their host platforms are pre-generated off-screen and scroll upward.
+      // Removing enemy.y > H here made almost every enemy disappear before
+      // the player could ever see it.
+      return enemy.active && enemy.platformRef.y > -120;
     });
   }
 
@@ -1442,6 +1443,7 @@
     STATE.enemies.length = 0;
     STATE.recentEnemyPlatforms.length = 0;
     STATE.nextEnemyId = 1;
+    STATE.enemyPlatformsUntilNext = 7 + Math.floor(STATE.rng() * 11);
 
     const startW = 150;
     const startY = IS_MOBILE ? Math.min(H * 0.58, 610) : H * 0.66;
@@ -1968,6 +1970,41 @@
   // ============================================================
   // 7) PLATFORM GÜNCELLE — ÖNCE PLATFORM
   // ============================================================
+  function shatterFragilePlatform(p, force = 1) {
+    if (!p || p.type !== TYPE.FRAGILE || p.broken) return false;
+
+    p.fragileTriggered = true;
+    p.fragileTimer = 0;
+    p.breakAnim = 1;
+    p.broken = true;
+    p.breakPieces.length = 0;
+
+    const pieceCount = 6;
+    const pieceW = p.w / pieceCount;
+
+    for (let i = 0; i < pieceCount; i++) {
+      const centerBias = i - (pieceCount - 1) / 2;
+      p.breakPieces.push({
+        x: p.x + i * pieceW,
+        y: p.y,
+        w: pieceW + 1,
+        h: p.h,
+        vx: centerBias * (30 + force * 10),
+        vy: -42 - (i % 2) * 24 - force * 18,
+        rot: 0,
+        vr: centerBias * (1.7 + force * 0.35),
+        alpha: 1,
+        fade: 0.74 + i * 0.045
+      });
+    }
+
+    burst(p.x + p.w * 0.5, p.y, 12);
+    AudioSys.break();
+    STATE.impactShake = Math.max(STATE.impactShake, 2.1 + force * 0.6);
+
+    return true;
+  }
+
   function updatePlatforms(dt) {
     for (const p of STATE.platforms) {
       p.prevX = p.x;
@@ -2002,28 +2039,7 @@
         p.breakAnim = Math.max(0, p.breakAnim - dt * 3.5);
 
         if (p.fragileTimer <= 0) {
-          p.broken = true;
-          p.breakPieces.length = 0;
-
-          const pieceCount = 5;
-          const pieceW = p.w / pieceCount;
-          for (let i = 0; i < pieceCount; i++) {
-            p.breakPieces.push({
-              x: p.x + i * pieceW,
-              y: p.y,
-              w: pieceW + 1,
-              h: p.h,
-              vx: (i - (pieceCount - 1) / 2) * 28,
-              vy: -40 - (i % 2) * 22,
-              rot: 0,
-              vr: (i - 2) * 1.8,
-              alpha: 1,
-              fade: 0.82 + i * 0.05
-            });
-          }
-
-          burst(p.x + p.w * 0.5, p.y, 10);
-          AudioSys.break();
+          shatterFragilePlatform(p, 0.45);
         }
       }
 
@@ -2058,13 +2074,13 @@
     INPUT.flickPulse *= Math.max(0, 1 - 18 * dt);
     INPUT.angryFaceTimer = Math.max(0, INPUT.angryFaceTimer - dt);
 
-    if (INPUT.stompDashTimer > 0) {
+    if (INPUT.stompDashActive) {
       INPUT.stompDashTimer = Math.max(0, INPUT.stompDashTimer - dt);
 
-      // Real downward stomp motion: fast but short-lived.
+      // Persistent stomp: keep pushing downward until the NEXT real surface,
+      // enemy, laser, or bottom boundary ends the move.
       PLAYER.vy = Math.max(PLAYER.vy, INPUT.stompDashSpeed);
 
-      // Strong visual compression during the dive.
       PLAYER.squash = Math.max(PLAYER.squash, 0.18);
       PLAYER.stretch = Math.max(PLAYER.stretch, 0.16);
     }
@@ -2228,12 +2244,36 @@
     if (best) {
       const p = best.p;
 
+      // Flick/stomp punches straight through a fragile platform.
+      // No bounce and no solid correction: it shatters immediately and the
+      // ball continues its downward dash through the opening.
+      if (
+        p.type === TYPE.FRAGILE &&
+        INPUT.stompDashActive &&
+        !INPUT.stompFragileBroken &&
+        PLAYER.vy > 0
+      ) {
+        shatterFragilePlatform(p, 1.35);
+        INPUT.stompFragileBroken = true;
+
+        // Dash continues after the ONE allowed instant fragile break.
+        PLAYER.vy = Math.max(PLAYER.vy, INPUT.stompDashSpeed * 0.88);
+        PLAYER.stretch = Math.max(PLAYER.stretch, 0.20);
+        PLAYER.squash = Math.max(PLAYER.squash, 0.16);
+        return;
+      }
+
       // Laser platforms only kill on the top beam, not from their sides/body.
 
       // Side impact: the platform is a REAL solid wall.
       // Stop the ball at the side and reset targetX there so continued
       // dragging cannot teleport it through the platform on the next step.
       if (best.nx !== 0) {
+        INPUT.stompDashActive = false;
+        INPUT.stompDashTimer = 0;
+        INPUT.stompFragileBroken = false;
+        INPUT.stompTargetId = null;
+
         if (best.nx < 0) {
           PLAYER.x = p.x - radius - skin;
         } else {
@@ -2253,9 +2293,18 @@
       // Landing on top.
       if (best.ny < 0) {
         if (p.type === TYPE.SPIKE) {
+          INPUT.stompDashActive = false;
+          INPUT.stompDashTimer = 0;
+          INPUT.stompFragileBroken = false;
           beginDeath("You touched a laser.");
           return;
         }
+
+        // A normal solid landing ends the persistent stomp.
+        INPUT.stompDashActive = false;
+        INPUT.stompDashTimer = 0;
+        INPUT.stompFragileBroken = false;
+        INPUT.stompTargetId = null;
 
         PLAYER.y = p.y - radius;
         PLAYER.prevY = PLAYER.y;
@@ -2321,6 +2370,11 @@
 
       // Hit underside while rising: stop upward travel and keep the ball below.
       if (best.ny > 0) {
+        INPUT.stompDashActive = false;
+        INPUT.stompDashTimer = 0;
+        INPUT.stompFragileBroken = false;
+        INPUT.stompTargetId = null;
+
         PLAYER.y = p.y + p.h + radius + skin;
         PLAYER.prevY = PLAYER.y;
         if (PLAYER.vy < 0) PLAYER.vy = 0;
@@ -2335,6 +2389,20 @@
 
       for (const p of STATE.platforms) {
         if (p.broken) continue;
+
+        if (
+          p.type === TYPE.FRAGILE &&
+          INPUT.stompDashActive &&
+          !INPUT.stompFragileBroken &&
+          PLAYER.vy > 0 &&
+          circleRectOverlap(PLAYER.x, PLAYER.y, radius, p, false)
+        ) {
+          shatterFragilePlatform(p, 1.2);
+          INPUT.stompFragileBroken = true;
+          PLAYER.vy = Math.max(PLAYER.vy, INPUT.stompDashSpeed * 0.86);
+          corrected = true;
+          continue;
+        }
 
         if (p.type === TYPE.SPIKE && laserBeamOverlap(PLAYER.x, PLAYER.y, radius, p)) {
           beginDeath("You touched a laser.");
@@ -2462,7 +2530,9 @@
 
     INPUT.flickPulse = 1;
     INPUT.stompDashTimer = INPUT.stompDashDuration;
-    INPUT.angryFaceTimer = 0.30;
+    INPUT.stompDashActive = true;
+    INPUT.stompFragileBroken = false;
+    INPUT.angryFaceTimer = 0.42;
 
     // Lock the nearest eligible enemy only as a stomp target hint.
     // The enemy is NOT killed until the ball actually reaches it.
@@ -2490,15 +2560,17 @@
       const dy = PLAYER.y - enemy.y;
 
       // Slightly forgiving circular body overlap.
-      const hitRadius = PLAYER.radius + enemy.radius * 0.82;
+      const hitRadius = PLAYER.radius + enemy.radius * 0.88;
       if (dx * dx + dy * dy <= hitRadius * hitRadius) {
         const stompActive =
-          INPUT.stompDashTimer > 0 &&
+          INPUT.stompDashActive &&
           PLAYER.vy > 0 &&
           PLAYER.y <= enemy.y + enemy.radius * 0.7;
 
         if (stompActive) {
+          INPUT.stompDashActive = false;
           INPUT.stompDashTimer = 0;
+          INPUT.stompFragileBroken = false;
           INPUT.stompTargetId = null;
           squashEnemy(enemy);
           return false;
@@ -2710,6 +2782,11 @@
     // The instant the ball's bottom edge touches the screen bottom line,
     // death wins before any platform collision can save the player.
     if (PLAYER.y + PLAYER.radius >= H) {
+      INPUT.stompDashActive = false;
+      INPUT.stompDashTimer = 0;
+      INPUT.stompFragileBroken = false;
+      INPUT.stompTargetId = null;
+
       PLAYER.x = clamp(PLAYER.x, PLAYER.radius + 2, W - PLAYER.radius - 2);
       PLAYER.y = H - PLAYER.radius;
       PLAYER.prevY = PLAYER.y;
@@ -2822,12 +2899,9 @@
       }
     }
 
-    if (STATE.landingFlash > 0) {
-      ctx.globalAlpha = STATE.landingFlash * 0.24;
-      ctx.fillStyle = "#ffffff";
-      ctx.fillRect(0, 0, W, H);
-      ctx.globalAlpha = 1;
-    }
+    // No full-screen white landing flash.
+    // Dark themes used to visibly "blink" white on every landing.
+    ctx.globalAlpha = 1;
   }
 
   function drawPlatforms() {
@@ -3408,7 +3482,7 @@
         (Math.abs(PLAYER.vy) - 240) / 470 +
         Math.abs(horizontalMotion) * 0.11 +
         Math.abs(PLAYER.windVX) / 650 +
-        (INPUT.stompDashTimer > 0 ? 0.42 : 0),
+        (INPUT.stompDashActive ? 0.42 : 0),
         0,
         0.72
       );
@@ -3479,7 +3553,7 @@
     const fallingFast = PLAYER.vy > 390;
     const fallingVeryFast = PLAYER.vy > 560;
     const fallingExtreme = PLAYER.vy > 760;
-    const angryStomp = INPUT.angryFaceTimer > 0;
+    const angryStomp = INPUT.stompDashActive || INPUT.angryFaceTimer > 0;
 
     // Eyes open dramatically on long falls.
     const eyeYOffset = angryStomp ? -1.2 : (fallingExtreme ? -0.8 : (fallingFast ? -1.5 : -2.2));
@@ -3641,6 +3715,31 @@
     ctx.restore();
   }
 
+
+  function drawLandingPulse() {
+    if (STATE.landingFlash <= 0 || STATE.mode !== MODE.PLAYING) return;
+
+    const a = clamp(STATE.landingFlash / 0.09, 0, 1);
+    const T = mixedTheme();
+
+    ctx.save();
+    ctx.globalAlpha = a * 0.20;
+    ctx.strokeStyle = T.playerStroke;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.ellipse(
+      PLAYER.x,
+      PLAYER.y + PLAYER.radius + 2,
+      18 + (1 - a) * 16,
+      5 + (1 - a) * 5,
+      0,
+      0,
+      TAU
+    );
+    ctx.stroke();
+    ctx.restore();
+  }
+
   function drawParticles() {
     ctx.fillStyle = "#4f7b68";
 
@@ -3774,6 +3873,7 @@
     drawPlatforms();
     drawEnemies();
     drawWindZones();
+    drawLandingPulse();
     drawParticles();
     drawDeathPieces();
     drawPlayer();
@@ -3807,7 +3907,7 @@
   // - Enemy patrol is restricted to the middle ~44% of its host platform.
   // - Revive platform and tutorial/start platform set noEnemy=true.
   // - Only NORMAL/MOVING platforms can spawn enemies.
-  // - Max 6 active enemies.
+  // - Max 8 active enemies.
   // - Normal contact with an unsquashed enemy is deadly.
   // - ArrowDown triggers the same flick-stomp action on desktop.
   // - Existing 1:1 pointer controls are untouched.
