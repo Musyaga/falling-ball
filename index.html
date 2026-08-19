@@ -532,7 +532,9 @@
 
     // Wind event
     winds: [],
-    nextWindSpawnScore: 340,
+    nextWindSpawnScore: 420,
+    lastWindEndTime: -Infinity,
+    minWindGapSeconds: 12,
     windSerial: 1,
     windEvent: null,
 
@@ -621,10 +623,8 @@
       mobileSwipeVelocity: 260,
       mobileAccumTravel: 16,
 
-      // Mobile gameplay uses a clean short tap for stomp.
-      mobileTapMaxMs: 230,
-      mobileTapMaxMove: 10,
-      mobileDragLockMove: 11
+      // Mobile flick must be clearly downward, not just horizontal drag jitter.
+      mobileDirectionRatio: 0.78
     }
   };
 
@@ -644,8 +644,6 @@
     flickTriggeredForPointer: false,
     pointerStartClientX: 0,
     pointerStartClientY: 0,
-    suppressTapStomp: false,
-    mobileGestureIsDrag: false,
     flickAccumDown: 0,
     flickLastY: 0,
     flickSmoothedVY: 0,
@@ -1610,10 +1608,12 @@
     if (STATE.windEvent) return;
     if (STATE.score < STATE.nextWindSpawnScore) return;
 
-    // Wind cadence: regular enough to be part of the run, but not spammy.
-    // Once the score threshold is reached, the event WILL happen instead of
-    // failing a second random roll and disappearing for another long interval.
-    STATE.nextWindSpawnScore = STATE.score + 430 + Math.random() * 390;
+    // Hard anti-spam gate: even if score rises quickly, wind cannot start
+    // again immediately after the previous event.
+    if (STATE.time - STATE.lastWindEndTime < STATE.minWindGapSeconds) return;
+
+    // More breathing room between wind events.
+    STATE.nextWindSpawnScore = STATE.score + 760 + Math.random() * 540;
 
     const dir = Math.random() < 0.5 ? -1 : 1;
 
@@ -1645,6 +1645,10 @@
   }
 
   function finishWindEvent() {
+    if (STATE.windEvent) {
+      STATE.lastWindEndTime = STATE.time;
+    }
+
     STATE.windEvent = null;
     STATE.winds.length = 0;
     STATE.windVisual = 0;
@@ -1787,7 +1791,8 @@
     STATE.windEvent = null;
     PLAYER.windVX = 0;
     PLAYER.windOffset = 0;
-    STATE.nextWindSpawnScore = 300 + Math.random() * 220;
+    STATE.lastWindEndTime = STATE.time - STATE.minWindGapSeconds;
+    STATE.nextWindSpawnScore = 420 + Math.random() * 280;
     STATE.windSerial = 1;
     STATE.deathTimer = 0;
     STATE.deathPhase = 0;
@@ -2738,7 +2743,7 @@
   }
 
   function checkEnemyContact() {
-    if (STATE.mode !== MODE.PLAYING) return;
+    if (STATE.mode !== MODE.PLAYING) return false;
 
     for (const enemy of STATE.enemies) {
       if (!enemy.active || enemy.squashed) continue;
@@ -2754,72 +2759,26 @@
         PLAYER.vy > 0 &&
         PLAYER.y <= enemy.y + enemy.radius * 0.7;
 
-      // Successful stomp remains unchanged.
+      // Successful stomp keeps the current kill/bonus behavior.
       if (stompActive) {
         INPUT.stompDashActive = false;
         INPUT.stompDashTimer = 0;
+        INPUT.stompDashRamp = 0;
         INPUT.stompFragileBroken = false;
         INPUT.stompTargetId = null;
         squashEnemy(enemy);
-        return;
+        return false;
       }
 
-      // Normal microbe contact is non-lethal.
-      if (STATE.time < (enemy.contactCooldownUntil || 0)) {
-        continue;
-      }
-      enemy.contactCooldownUntil = STATE.time + 0.30;
-
-      let pushDir = Math.sign(dx);
-      if (pushDir === 0) {
-        pushDir = Math.sign(PLAYER.visualVX) || -enemy.patrolDir || 1;
-      }
-
-      // Small bounce-back away from the microbe.
-      PLAYER.vx = pushDir * 185;
-      PLAYER.targetX = clamp(
-        PLAYER.targetX + pushDir * 5,
-        PLAYER.radius,
-        W - PLAYER.radius
-      );
-
-      // Avoid sticky overlap without giving stomp-height bounce.
-      if (PLAYER.vy > 40) {
-        PLAYER.vy = Math.min(PLAYER.vy, 150);
-      }
-
-      // Miss-level penalty only: combo is lost, run continues.
-      STATE.combo = 0;
-      STATE.multiplier = 1;
-      updateHUD();
-
-      // Neutral contact particles, clearly different from stomp effect.
-      ParticleSys.spawn(
-        enemy.x + pushDir * enemy.radius * 0.45,
-        enemy.y - enemy.radius * 0.10,
-        {
-          count: 7,
-          color: "#b8b5a7",
-          speedMin: 18,
-          speedMax: 58,
-          lift: 18,
-          lifeMin: 0.16,
-          lifeMax: 0.30,
-          sizeMin: 1.2,
-          sizeMax: 2.6
-        }
-      );
-
-      PLAYER.squash = Math.max(PLAYER.squash, 0.08);
-      STATE.impactShake = Math.max(STATE.impactShake, 0.45);
-      AudioSys.contact();
-
-      // One reaction per frame is enough.
-      return;
+      // Normal monster contact is lethal again.
+      beginDeath("You touched a microbe.");
+      return true;
     }
+
+    return false;
   }
 
-  function recordFlickSample(clientY, timeStamp) {
+  function recordFlickSample(clientX, clientY, timeStamp) {
     const now = Number.isFinite(timeStamp) ? timeStamp : performance.now();
     const samples = INPUT.flickSamples;
 
@@ -2832,15 +2791,15 @@
       if (dyStep > 0.6) {
         INPUT.flickAccumDown += dyStep;
       } else {
-        INPUT.flickAccumDown *= 0.92;
+        INPUT.flickAccumDown *= 0.90;
       }
 
       INPUT.flickSmoothedVY =
-        INPUT.flickSmoothedVY * 0.68 + instantVY * 0.32;
+        INPUT.flickSmoothedVY * 0.70 + instantVY * 0.30;
     }
 
     INPUT.flickLastY = clientY;
-    samples.push({ y: clientY, t: now });
+    samples.push({ x: clientX, y: clientY, t: now });
 
     const cutoff = now - CONFIG.controls.flickWindowMs;
     while (samples.length > 2 && samples[0].t < cutoff) {
@@ -2852,23 +2811,38 @@
     const first = samples[0];
     const last = samples[samples.length - 1];
     const dtMs = Math.max(16, last.t - first.t);
+
+    const deltaX = last.x - first.x;
     const deltaY = last.y - first.y;
     const verticalVelocity = deltaY / (dtMs / 1000);
 
     const cooldownReady =
       now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs;
 
+    // Key mobile safeguard:
+    // downward travel must be strong compared with horizontal travel.
+    // Normal left/right drag with a little vertical thumb wobble won't stomp.
+    const downwardDominant =
+      !IS_MOBILE ||
+      (
+        deltaY > 0 &&
+        deltaY >= Math.abs(deltaX) * CONFIG.controls.mobileDirectionRatio
+      );
+
     const classicFlick =
       deltaY >= CONFIG.controls.flickMinTravel &&
-      verticalVelocity >= CONFIG.controls.flickThreshold;
+      verticalVelocity >= CONFIG.controls.flickThreshold &&
+      downwardDominant;
 
     const smoothMobileFlick =
       IS_MOBILE &&
+      downwardDominant &&
       INPUT.flickAccumDown >= CONFIG.controls.mobileAccumTravel &&
       INPUT.flickSmoothedVY >= CONFIG.controls.mobileSwipeVelocity;
 
     const intentFlick =
       IS_MOBILE &&
+      downwardDominant &&
       deltaY >= CONFIG.controls.mobileSwipeTravel &&
       dtMs <= CONFIG.controls.mobileSwipeMaxMs &&
       (
@@ -2886,7 +2860,7 @@
       INPUT.flickAccumDown = 0;
       INPUT.flickSmoothedVY = 0;
       samples.length = 0;
-      samples.push({ y: clientY, t: now });
+      samples.push({ x: clientX, y: clientY, t: now });
       triggerDownFlick();
     }
   }
@@ -3071,9 +3045,12 @@
 
     sweptPlatformCollision();
 
-    // Living microbe contact is now non-lethal.
-    // Stomp still destroys the microbe; normal contact only recoils + resets combo.
-    checkEnemyContact();
+    // Normal monster contact is lethal; stomp contact still destroys it.
+    if (checkEnemyContact()) {
+      updateParticles(dt);
+      updatePopups(dt);
+      return;
+    }
 
     if (STATE.mode !== MODE.PLAYING) {
       updateParticles(dt);
@@ -4382,7 +4359,7 @@
     ctx.textAlign = "center";
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.fillText(
-      IS_MOBILE ? "TAP = BREAK + STOMP" : "FLICK = BREAK + STOMP",
+      "FLICK = BREAK + STOMP",
       panelX + panelW * 0.5,
       panelY + 28
     );
@@ -4569,7 +4546,7 @@
       ctx.textAlign = "left";
       ctx.font = "900 8px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
       ctx.fillStyle = T.text;
-      ctx.fillText(IS_MOBILE ? "TEK DOKUN" : "AŞAĞI ÇEK", fingerX - 20, panelY + 116);
+      ctx.fillText("AŞAĞI ÇEK", fingerX - 20, panelY + 116);
     }
 
     // Enemy shatter particles after impact.
@@ -4718,7 +4695,7 @@
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.font = "900 11px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
-    ctx.fillText(IS_MOBILE ? "DOKUN!" : "AŞAĞI ÇEK!", bx, by - 1);
+    ctx.fillText("AŞAĞI ÇEK!", bx, by - 1);
 
     // No standalone down-arrow icon here; text + tutorial animation are enough.
     ctx.restore();
@@ -4753,7 +4730,7 @@
 
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.globalAlpha = a * 0.58;
-    ctx.fillText(IS_MOBILE ? "TAP TO STOMP" : "USE STOMP", x, y + 38);
+    ctx.fillText(IS_MOBILE ? "QUICK DOWN SWIPE" : "USE STOMP", x, y + 38);
 
     ctx.restore();
   }
@@ -4908,9 +4885,7 @@
   canvas.addEventListener("pointerdown", e => {
     AudioSys.init();
 
-    const startedInTutorial = STATE.mode === MODE.TUTORIAL;
-
-    if (startedInTutorial) {
+    if (STATE.mode === MODE.TUTORIAL) {
       beginActualRun();
     }
 
@@ -4940,12 +4915,11 @@
     INPUT.flickTriggeredForPointer = false;
     INPUT.pointerStartClientX = e.clientX;
     INPUT.pointerStartClientY = e.clientY;
-    INPUT.suppressTapStomp = startedInTutorial;
-    INPUT.mobileGestureIsDrag = false;
     INPUT.flickAccumDown = 0;
     INPUT.flickLastY = e.clientY;
     INPUT.flickSmoothedVY = 0;
     INPUT.flickSamples.push({
+      x: e.clientX,
       y: e.clientY,
       t: flickNow
     });
@@ -4960,15 +4934,6 @@
     const deltaX = currentX - INPUT.lastPointerX;
     INPUT.lastPointerX = currentX;
 
-    // MOBILE: once the finger moves meaningfully, this gesture becomes
-    // a movement drag and can no longer trigger stomp on release.
-    if (IS_MOBILE && !INPUT.mobileGestureIsDrag) {
-      const totalDx = e.clientX - INPUT.pointerStartClientX;
-      const totalDy = e.clientY - INPUT.pointerStartClientY;
-      if (Math.hypot(totalDx, totalDy) >= CONFIG.controls.mobileDragLockMove) {
-        INPUT.mobileGestureIsDrag = true;
-      }
-    }
 
     // Faster drag response while preserving relative-drag behavior:
     // touching again never teleports the ball.
@@ -4979,11 +4944,9 @@
       W - PLAYER.radius
     );
 
-    // Desktop keeps the original flick detector.
-    // Mobile uses tap-only stomp to prevent accidental activation while dragging.
-    if (!IS_MOBILE) {
-      recordFlickSample(e.clientY, e.timeStamp);
-    }
+    // Flick detector runs on both desktop pointer and mobile touch.
+    // On mobile it requires a clearly downward-dominant gesture.
+    recordFlickSample(e.clientX, e.clientY, e.timeStamp);
 
   });
 
@@ -4991,24 +4954,22 @@
     if (e.pointerId !== INPUT.pointerId) return;
 
     const now = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
-    const dtMs = Math.max(1, now - INPUT.flickStartTime);
 
-    // MOBILE ONLY — stomp is now TAP-ONLY.
-    // If the gesture ever became a drag, it is guaranteed not to stomp.
-    if (
-      IS_MOBILE &&
-      STATE.mode === MODE.PLAYING &&
-      !INPUT.suppressTapStomp &&
-      !INPUT.mobileGestureIsDrag &&
-      !INPUT.flickTriggeredForPointer
-    ) {
-      const tapDx = e.clientX - INPUT.pointerStartClientX;
-      const tapDy = e.clientY - INPUT.pointerStartClientY;
-      const tapMove = Math.hypot(tapDx, tapDy);
+    // Mobile fallback for sparse pointermove delivery:
+    // only a clearly downward-dominant swipe can trigger stomp.
+    if (IS_MOBILE && !INPUT.flickTriggeredForPointer) {
+      const dtMs = Math.max(1, now - INPUT.flickStartTime);
+      const dx = e.clientX - INPUT.pointerStartClientX;
+      const dy = e.clientY - INPUT.pointerStartClientY;
+
+      const downwardDominant =
+        dy > 0 &&
+        dy >= Math.abs(dx) * CONFIG.controls.mobileDirectionRatio;
 
       if (
-        dtMs <= CONFIG.controls.mobileTapMaxMs &&
-        tapMove <= CONFIG.controls.mobileTapMaxMove &&
+        downwardDominant &&
+        dy >= 18 &&
+        dtMs <= 360 &&
         now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs
       ) {
         INPUT.flickTriggeredForPointer = true;
@@ -5022,8 +4983,6 @@
     INPUT.lastPointerX = 0;
     INPUT.flickSamples.length = 0;
     INPUT.flickTriggeredForPointer = false;
-    INPUT.suppressTapStomp = false;
-    INPUT.mobileGestureIsDrag = false;
     INPUT.flickAccumDown = 0;
     INPUT.flickSmoothedVY = 0;
   }
