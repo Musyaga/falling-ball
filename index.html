@@ -573,7 +573,7 @@
     prevX: W * 0.5,
     prevY: H * 0.34,
 
-    radius: IS_MOBILE ? 18 : 16,
+    radius: IS_MOBILE ? 17 : 16,
     vy: 0,
 
     gravity: 1580,
@@ -1216,6 +1216,20 @@
       type = TYPE.NORMAL;
     }
 
+    // Fragile platformun hemen arkasına lazer koyma.
+    // Oyuncu kırılabilir platformdan geçtikten sonra toparlanacak güvenli bir
+    // yüzey görsün. Bir öncekinin de fragile olması durumunda lazeri büyük
+    // ölçüde bastırıyoruz.
+    if (type === TYPE.SPIKE && last === TYPE.FRAGILE) {
+      type = Math.random() < 0.72 ? TYPE.NORMAL : TYPE.MOVING;
+    } else if (
+      type === TYPE.SPIKE &&
+      secondLast === TYPE.FRAGILE &&
+      Math.random() < 0.82
+    ) {
+      type = Math.random() < 0.68 ? TYPE.NORMAL : TYPE.MOVING;
+    }
+
     // Son iki tip aynıysa, üçüncü aynı olamaz.
     if (last && secondLast && last === secondLast && type === last) {
       const safeTypes = [TYPE.NORMAL, TYPE.MOVING, TYPE.FRAGILE, TYPE.SPIKE]
@@ -1373,7 +1387,7 @@
       prevY: y,
 
       w,
-      h: IS_MOBILE ? 17 : 15,
+      h: IS_MOBILE ? 16 : 15,
 
       moveDir: Math.random() < 0.5 ? -1 : 1,
       moveSpeed: 65 + Math.random() * 45,
@@ -1417,8 +1431,8 @@
   function chooseReachableGap() {
     // Mobile gets more breathing room so the screen is not packed
     // with platforms. Desktop keeps the previous density.
-    const minGap = IS_MOBILE ? 166 : 110;
-    const maxGap = IS_MOBILE ? 222 : 148;
+    const minGap = IS_MOBILE ? 150 : 110;
+    const maxGap = IS_MOBILE ? 194 : 148;
 
     // Still validate each new platform against the CURRENT scroll speed.
     for (let attempt = 0; attempt < 24; attempt++) {
@@ -1430,15 +1444,15 @@
       }
     }
 
-    return IS_MOBILE ? 186 : 132;
+    return IS_MOBILE ? 166 : 132;
   }
 
   // PHASE-0
   // PLATFORM GENİŞLİĞİ REGRESYONU DÜZELTMESİ
   // Enemy sistemi platform genişliğini ASLA değiştirmez.
   // Geniş platform dağılımı korunur: 88 <= w < 154.
-  const PLATFORM_WIDTH_MIN = IS_MOBILE ? 96 : 88;
-  const PLATFORM_WIDTH_RANGE = IS_MOBILE ? 72 : 66;
+  const PLATFORM_WIDTH_MIN = IS_MOBILE ? 92 : 88;
+  const PLATFORM_WIDTH_RANGE = IS_MOBILE ? 68 : 66;
 
   function spawnNextPlatform() {
     // Batch yok: her çağrıda SADECE 1 platform.
@@ -1457,7 +1471,7 @@
     // Mobile visual spacing:
     // avoid repeatedly spawning platforms on almost the same vertical line.
     if (IS_MOBILE && STATE.lastSpawnCenterX !== null) {
-      const minCenterSeparation = Math.min(92, W * 0.20);
+      const minCenterSeparation = Math.min(78, W * 0.17);
       let bestX = x;
       let bestSep = Math.abs((x + w * 0.5) - STATE.lastSpawnCenterX);
 
@@ -1499,7 +1513,7 @@
     STATE.nextEnemyId = 1;
     STATE.enemyPlatformsUntilNext = 7 + Math.floor(STATE.rng() * 11);
 
-    const startW = IS_MOBILE ? 162 : 150;
+    const startW = IS_MOBILE ? 156 : 150;
     const startY = IS_MOBILE ? Math.min(H * 0.58, 610) : H * 0.66;
     const tutorialPlatform =
       createPlatform(TYPE.NORMAL, W * 0.5 - startW * 0.5, startY, startW);
@@ -1509,7 +1523,7 @@
 
     // Başlangıçta sadece ekranı dolduracak kadar.
     // Her gap yine ayrı ayrı güncel hesapla oluşturuluyor.
-    const initialPlatformCount = IS_MOBILE ? 6 : 14;
+    const initialPlatformCount = IS_MOBILE ? 7 : 14;
     for (let i = 0; i < initialPlatformCount; i++) {
       spawnNextPlatform();
     }
@@ -1526,7 +1540,7 @@
     // the player is falling or because the visible count became low.
     // Keep a modest off-screen runway so nothing can feel like a rescue spawn.
     let spawnGuard = 0;
-    const platformBuffer = IS_MOBILE ? 80 : 190;
+    const platformBuffer = IS_MOBILE ? 115 : 190;
 
     while (lowestY < H + platformBuffer && spawnGuard < (IS_MOBILE ? 2 : 3)) {
       spawnNextPlatform();
@@ -1555,6 +1569,13 @@
     const warningDuration = 1.65;
     const activeDuration = 3.5 + Math.random() * 0.5;
 
+    // Wind difficulty scales with progress instead of starting strong.
+    // Early run: gentle nudge. Late run: noticeable, but capped so it never
+    // overrides normal drag control or ruins a landing by itself.
+    const windProgress = clamp(STATE.score / 3200, 0, 1);
+    const windEase = windProgress * windProgress * (3 - 2 * windProgress);
+    const windStrength = lerp(255, 465, windEase) + Math.random() * 20;
+
     STATE.windEvent = {
       id: STATE.windSerial++,
       phase: "warning",
@@ -1565,7 +1586,7 @@
       startedAt: STATE.time,
       endsAt: STATE.time + warningDuration + activeDuration + 0.08,
       dir,
-      strength: 520 + Math.random() * 110
+      strength: windStrength
     };
 
     // Keep winds array empty; fullscreen event is not tied to world Y.
@@ -1683,8 +1704,8 @@
 
     // Wind now physically arrives from one side, builds up smoothly,
     // then fades while travelling out through the opposite side.
-    const pulse = 0.94 + 0.06 * Math.sin(STATE.time * 3.2);
-    const pushSpeed = e.strength * pulse * 0.34 * flow.amount;
+    const pulse = 0.95 + 0.05 * Math.sin(STATE.time * 3.2);
+    const pushSpeed = e.strength * pulse * 0.32 * flow.amount;
 
     PLAYER.targetX += e.dir * pushSpeed * dt;
     PLAYER.targetX = clamp(PLAYER.targetX, PLAYER.radius, W - PLAYER.radius);
@@ -1971,7 +1992,7 @@
       p.y < safeY - 150 || p.y > safeY + 150
     );
 
-    const safeW = IS_MOBILE ? 192 : 180;
+    const safeW = IS_MOBILE ? 186 : 180;
     const safeX = clamp(W * 0.5 - safeW * 0.5, 18, W - safeW - 18);
     const safePlatform = createPlatform(TYPE.NORMAL, safeX, safeY, safeW);
     safePlatform.perfectGranted = true;
