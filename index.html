@@ -493,6 +493,7 @@
 
     platforms: [],
     nextPlatformId: 1,
+    lastSpawnCenterX: null,
     lastTypes: [],
 
     // PHASE-0 — enemy state + deterministic RNG
@@ -572,7 +573,7 @@
     prevX: W * 0.5,
     prevY: H * 0.34,
 
-    radius: IS_MOBILE ? 20 : 16,
+    radius: IS_MOBILE ? 18 : 16,
     vy: 0,
 
     gravity: 1580,
@@ -1372,7 +1373,7 @@
       prevY: y,
 
       w,
-      h: IS_MOBILE ? 18 : 15,
+      h: IS_MOBILE ? 17 : 15,
 
       moveDir: Math.random() < 0.5 ? -1 : 1,
       moveSpeed: 65 + Math.random() * 45,
@@ -1416,8 +1417,8 @@
   function chooseReachableGap() {
     // Mobile gets more breathing room so the screen is not packed
     // with platforms. Desktop keeps the previous density.
-    const minGap = IS_MOBILE ? 132 : 110;
-    const maxGap = IS_MOBILE ? 174 : 148;
+    const minGap = IS_MOBILE ? 166 : 110;
+    const maxGap = IS_MOBILE ? 222 : 148;
 
     // Still validate each new platform against the CURRENT scroll speed.
     for (let attempt = 0; attempt < 24; attempt++) {
@@ -1429,15 +1430,15 @@
       }
     }
 
-    return IS_MOBILE ? 150 : 132;
+    return IS_MOBILE ? 186 : 132;
   }
 
   // PHASE-0
   // PLATFORM GENİŞLİĞİ REGRESYONU DÜZELTMESİ
   // Enemy sistemi platform genişliğini ASLA değiştirmez.
   // Geniş platform dağılımı korunur: 88 <= w < 154.
-  const PLATFORM_WIDTH_MIN = IS_MOBILE ? 104 : 88;
-  const PLATFORM_WIDTH_RANGE = IS_MOBILE ? 80 : 66;
+  const PLATFORM_WIDTH_MIN = IS_MOBILE ? 96 : 88;
+  const PLATFORM_WIDTH_RANGE = IS_MOBILE ? 72 : 66;
 
   function spawnNextPlatform() {
     // Batch yok: her çağrıda SADECE 1 platform.
@@ -1451,7 +1452,34 @@
     const y = baseY + gap;
 
     const w = PLATFORM_WIDTH_MIN + Math.random() * PLATFORM_WIDTH_RANGE;
-    const x = 20 + Math.random() * (W - w - 40);
+    let x = 20 + Math.random() * (W - w - 40);
+
+    // Mobile visual spacing:
+    // avoid repeatedly spawning platforms on almost the same vertical line.
+    if (IS_MOBILE && STATE.lastSpawnCenterX !== null) {
+      const minCenterSeparation = Math.min(92, W * 0.20);
+      let bestX = x;
+      let bestSep = Math.abs((x + w * 0.5) - STATE.lastSpawnCenterX);
+
+      for (let attempt = 0; attempt < 8; attempt++) {
+        const candidateX = 18 + Math.random() * (W - w - 36);
+        const center = candidateX + w * 0.5;
+        const sep = Math.abs(center - STATE.lastSpawnCenterX);
+
+        if (sep > bestSep) {
+          bestSep = sep;
+          bestX = candidateX;
+        }
+        if (sep >= minCenterSeparation) {
+          bestX = candidateX;
+          break;
+        }
+      }
+
+      x = bestX;
+    }
+
+    STATE.lastSpawnCenterX = x + w * 0.5;
     const type = choosePlatformType();
 
     const platform = createPlatform(type, x, y, w);
@@ -1463,6 +1491,7 @@
     STATE.platforms.length = 0;
     STATE.lastTypes.length = 0;
     STATE.nextPlatformId = 1;
+    STATE.lastSpawnCenterX = null;
 
     // PHASE-3 — tutorial/start platform is always enemy-free.
     STATE.enemies.length = 0;
@@ -1470,16 +1499,17 @@
     STATE.nextEnemyId = 1;
     STATE.enemyPlatformsUntilNext = 7 + Math.floor(STATE.rng() * 11);
 
-    const startW = IS_MOBILE ? 172 : 150;
+    const startW = IS_MOBILE ? 162 : 150;
     const startY = IS_MOBILE ? Math.min(H * 0.58, 610) : H * 0.66;
     const tutorialPlatform =
       createPlatform(TYPE.NORMAL, W * 0.5 - startW * 0.5, startY, startW);
     tutorialPlatform.noEnemy = true;
     STATE.platforms.push(tutorialPlatform);
+    STATE.lastSpawnCenterX = tutorialPlatform.x + tutorialPlatform.w * 0.5;
 
     // Başlangıçta sadece ekranı dolduracak kadar.
     // Her gap yine ayrı ayrı güncel hesapla oluşturuluyor.
-    const initialPlatformCount = IS_MOBILE ? 9 : 14;
+    const initialPlatformCount = IS_MOBILE ? 6 : 14;
     for (let i = 0; i < initialPlatformCount; i++) {
       spawnNextPlatform();
     }
@@ -1496,9 +1526,9 @@
     // the player is falling or because the visible count became low.
     // Keep a modest off-screen runway so nothing can feel like a rescue spawn.
     let spawnGuard = 0;
-    const platformBuffer = IS_MOBILE ? 150 : 190;
+    const platformBuffer = IS_MOBILE ? 80 : 190;
 
-    while (lowestY < H + platformBuffer && spawnGuard < 3) {
+    while (lowestY < H + platformBuffer && spawnGuard < (IS_MOBILE ? 2 : 3)) {
       spawnNextPlatform();
       const newest = STATE.platforms[STATE.platforms.length - 1];
       lowestY = newest ? newest.y : lowestY;
@@ -1941,7 +1971,7 @@
       p.y < safeY - 150 || p.y > safeY + 150
     );
 
-    const safeW = IS_MOBILE ? 202 : 180;
+    const safeW = IS_MOBILE ? 192 : 180;
     const safeX = clamp(W * 0.5 - safeW * 0.5, 18, W - safeW - 18);
     const safePlatform = createPlatform(TYPE.NORMAL, safeX, safeY, safeW);
     safePlatform.perfectGranted = true;
@@ -4641,4 +4671,4 @@
 })();
 </script>
 </body>
-</html> 
+</html>
