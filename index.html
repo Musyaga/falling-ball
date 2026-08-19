@@ -562,7 +562,8 @@
     themeFromIndex: 0,
     themeToIndex: 0,
     themeTransition: 1,
-    tutorialTime: 0
+    tutorialTime: 0,
+    flickHintTimer: 0
   };
 
   const PLAYER = {
@@ -598,13 +599,18 @@
     controls: {
       // Desktop keeps the firmer flick.
       // Mobile is intentionally more forgiving because thumb travel is shorter.
-      flickThreshold: IS_MOBILE ? 720 : 1050,
-      flickWindowMs: IS_MOBILE ? 175 : 135,
-      flickMinTravel: IS_MOBILE ? 17 : 24,
-      flickCooldownMs: 180,
+      flickThreshold: IS_MOBILE ? 560 : 1050,
+      flickWindowMs: IS_MOBILE ? 220 : 135,
+      flickMinTravel: IS_MOBILE ? 14 : 24,
+      flickCooldownMs: IS_MOBILE ? 150 : 180,
 
       // Slight mobile-only forgiveness around enemies.
-      flickEnemyRangeMul: IS_MOBILE ? 5.0 : 4.0
+      flickEnemyRangeMul: IS_MOBILE ? 5.4 : 4.0,
+
+      // Direct short-swipe fallback for touchscreens.
+      mobileSwipeTravel: 15,
+      mobileSwipeMaxMs: 250,
+      mobileSwipeVelocity: 420
     }
   };
 
@@ -619,6 +625,9 @@
     flickSamples: [],
     lastFlickAt: -Infinity,
     flickPulse: 0,
+    flickStartY: 0,
+    flickStartTime: 0,
+    flickTriggeredForPointer: false,
 
     // Special stomp/flick animation state.
     stompDashTimer: 0,
@@ -1405,10 +1414,10 @@
   }
 
   function chooseReachableGap() {
-    // Faster bounce needs platforms to arrive sooner, but still keep
-    // enough vertical breathing room to avoid crowding.
-    const minGap = 110;
-    const maxGap = 148;
+    // Mobile gets more breathing room so the screen is not packed
+    // with platforms. Desktop keeps the previous density.
+    const minGap = IS_MOBILE ? 132 : 110;
+    const maxGap = IS_MOBILE ? 174 : 148;
 
     // Still validate each new platform against the CURRENT scroll speed.
     for (let attempt = 0; attempt < 24; attempt++) {
@@ -1420,7 +1429,7 @@
       }
     }
 
-    return 132;
+    return IS_MOBILE ? 150 : 132;
   }
 
   // PHASE-0
@@ -1470,7 +1479,8 @@
 
     // Başlangıçta sadece ekranı dolduracak kadar.
     // Her gap yine ayrı ayrı güncel hesapla oluşturuluyor.
-    for (let i = 0; i < 14; i++) {
+    const initialPlatformCount = IS_MOBILE ? 9 : 14;
+    for (let i = 0; i < initialPlatformCount; i++) {
       spawnNextPlatform();
     }
   }
@@ -1486,7 +1496,7 @@
     // the player is falling or because the visible count became low.
     // Keep a modest off-screen runway so nothing can feel like a rescue spawn.
     let spawnGuard = 0;
-    const platformBuffer = IS_MOBILE ? 220 : 190;
+    const platformBuffer = IS_MOBILE ? 150 : 190;
 
     while (lowestY < H + platformBuffer && spawnGuard < 3) {
       spawnNextPlatform();
@@ -1743,6 +1753,7 @@
     if (STATE.mode !== MODE.TUTORIAL) return;
 
     STATE.mode = MODE.PLAYING;
+    STATE.flickHintTimer = 5.2;
     PLAYER.vy = 80;
     PLAYER.prevY = PLAYER.y;
 
@@ -2132,6 +2143,7 @@
   // ============================================================
   function updatePlayer(dt) {
     INPUT.flickPulse *= Math.max(0, 1 - 18 * dt);
+    STATE.flickHintTimer = Math.max(0, STATE.flickHintTimer - dt);
     INPUT.angryFaceTimer = Math.max(0, INPUT.angryFaceTimer - dt);
 
     if (INPUT.stompDashActive) {
@@ -2698,7 +2710,12 @@
       shortDeltaY >= 13 &&
       shortVelocity >= 760;
 
-    if (cooldownReady && (normalFlick || mobileQuickFlick)) {
+    if (
+      cooldownReady &&
+      !INPUT.flickTriggeredForPointer &&
+      (normalFlick || mobileQuickFlick)
+    ) {
+      INPUT.flickTriggeredForPointer = true;
       INPUT.lastFlickAt = now;
       samples.length = 0;
       samples.push({ y: clientY, t: now });
@@ -4198,9 +4215,75 @@
     ctx.font = "900 20px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.fillText("DRAG", W * 0.5, y + 38);
 
-    ctx.font = "900 12px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    // Flick tutorial: short downward arrow and label.
+    const fy = y + 82;
+    ctx.globalAlpha = pulse * 0.95;
+    ctx.lineWidth = 3.2;
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5, fy - 14);
+    ctx.lineTo(W * 0.5, fy + 18);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(W * 0.5, fy + 18);
+    ctx.lineTo(W * 0.5 - 9, fy + 7);
+    ctx.moveTo(W * 0.5, fy + 18);
+    ctx.lineTo(W * 0.5 + 9, fy + 7);
+    ctx.stroke();
+
+    ctx.font = "900 15px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("FLICK DOWN = STOMP", W * 0.5, fy + 43);
+
+    ctx.font = "900 11px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.globalAlpha = 0.68;
+    ctx.fillText("BREAK FRAGILE • HIT CREATURES", W * 0.5, fy + 63);
+
     ctx.globalAlpha = 0.72;
-    ctx.fillText("TAP TO START", W * 0.5, y + 65);
+    ctx.fillText("TAP TO START", W * 0.5, fy + 88);
+
+    ctx.restore();
+  }
+
+
+  function drawFlickHint() {
+    if (
+      STATE.mode !== MODE.PLAYING ||
+      STATE.flickHintTimer <= 0
+    ) return;
+
+    const T = mixedTheme();
+    const fadeIn = clamp((5.2 - STATE.flickHintTimer) / 0.35, 0, 1);
+    const fadeOut = clamp(STATE.flickHintTimer / 0.8, 0, 1);
+    const a = Math.min(fadeIn, fadeOut);
+
+    ctx.save();
+    ctx.globalAlpha = a * 0.82;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = T.text;
+    ctx.fillStyle = T.text;
+    ctx.lineWidth = 2.6;
+    ctx.lineCap = "round";
+
+    const x = W * 0.5;
+    const y = H * 0.22;
+
+    ctx.beginPath();
+    ctx.moveTo(x, y - 18);
+    ctx.lineTo(x, y + 12);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x, y + 12);
+    ctx.lineTo(x - 8, y + 3);
+    ctx.moveTo(x, y + 12);
+    ctx.lineTo(x + 8, y + 3);
+    ctx.stroke();
+
+    ctx.font = "900 14px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.fillText("FLICK DOWN TO STOMP", x, y + 34);
+
+    ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
+    ctx.globalAlpha = a * 0.58;
+    ctx.fillText("↓  FAST SWIPE", x, y + 52);
 
     ctx.restore();
   }
@@ -4260,6 +4343,7 @@
     drawDeathPieces();
     drawPlayer();
     drawTutorial();
+    drawFlickHint();
     drawPopups();
 
     // Last layer: platforms visually pass behind the top spikes.
@@ -4374,9 +4458,13 @@
 
     // PHASE-1 — initialize independent Y-only flick history.
     INPUT.flickSamples.length = 0;
+    const flickNow = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
+    INPUT.flickStartY = e.clientY;
+    INPUT.flickStartTime = flickNow;
+    INPUT.flickTriggeredForPointer = false;
     INPUT.flickSamples.push({
       y: e.clientY,
-      t: Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now()
+      t: flickNow
     });
 
     canvas.setPointerCapture?.(e.pointerId);
@@ -4400,14 +4488,55 @@
 
     // PHASE-1 — parallel signal only. This never writes pointerX/targetX.
     recordFlickSample(e.clientY, e.timeStamp);
+
+    // Mobile reliability path: a short, clear downward swipe is enough.
+    // This is intentionally independent from horizontal drag.
+    if (IS_MOBILE && !INPUT.flickTriggeredForPointer) {
+      const now = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
+      const dtMs = Math.max(1, now - INPUT.flickStartTime);
+      const dy = e.clientY - INPUT.flickStartY;
+      const vy = dy / (dtMs / 1000);
+
+      if (
+        dy >= CONFIG.controls.mobileSwipeTravel &&
+        dtMs <= CONFIG.controls.mobileSwipeMaxMs &&
+        vy >= CONFIG.controls.mobileSwipeVelocity &&
+        now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs
+      ) {
+        INPUT.flickTriggeredForPointer = true;
+        INPUT.lastFlickAt = now;
+        INPUT.flickSamples.length = 0;
+        triggerDownFlick();
+      }
+    }
   });
 
   function endPointer(e) {
     if (e.pointerId !== INPUT.pointerId) return;
+
+    if (IS_MOBILE && !INPUT.flickTriggeredForPointer) {
+      const now = Number.isFinite(e.timeStamp) ? e.timeStamp : performance.now();
+      const dtMs = Math.max(1, now - INPUT.flickStartTime);
+      const dy = e.clientY - INPUT.flickStartY;
+      const vy = dy / (dtMs / 1000);
+
+      if (
+        dy >= CONFIG.controls.mobileSwipeTravel &&
+        dtMs <= CONFIG.controls.mobileSwipeMaxMs &&
+        vy >= CONFIG.controls.mobileSwipeVelocity &&
+        now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs
+      ) {
+        INPUT.flickTriggeredForPointer = true;
+        INPUT.lastFlickAt = now;
+        triggerDownFlick();
+      }
+    }
+
     INPUT.active = false;
     INPUT.pointerId = null;
     INPUT.lastPointerX = 0;
     INPUT.flickSamples.length = 0;
+    INPUT.flickTriggeredForPointer = false;
   }
 
   canvas.addEventListener("pointerup", endPointer);
