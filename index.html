@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
-<title>PAPER FALL</title>
+<title>SQUISH FALL</title>
 <style>
   *{box-sizing:border-box;margin:0;
     padding:0;padding:0}
@@ -231,6 +231,12 @@
     color:#fffaf0;
   }
 
+  #menuBtn{
+    margin-top:10px;
+    background:#fffaf0;
+    color:#29332f;
+  }
+
 
   @media (max-width:700px){
     #game{
@@ -261,11 +267,12 @@
 
   <div id="overlay">
     <div id="panel">
-      <h1 id="panelTitle">PAPER FALL</h1>
+      <h1 id="panelTitle">SQUISH FALL</h1>
       <p id="panelText"></p>
       <div id="reviveCountdown" style="display:none"></div>
       <button id="reviveBtn" style="display:none">WATCH AD & CONTINUE</button>
       <button id="playBtn">PLAY</button>
+      <button id="menuBtn" style="display:none">MAIN MENU</button>
     </div>
   </div>
 </div>
@@ -289,6 +296,7 @@
   const reviveBtn = document.getElementById("reviveBtn");
   const reviveCountdown = document.getElementById("reviveCountdown");
   const muteBtn = document.getElementById("muteBtn");
+  const menuBtn = document.getElementById("menuBtn");
 
   const DPR = Math.min(window.devicePixelRatio || 1, 1.4);
   const IS_MOBILE = window.matchMedia("(max-width:700px)").matches;
@@ -625,8 +633,178 @@
 
       // Mobile flick must be clearly downward, not just horizontal drag jitter.
       mobileDirectionRatio: 0.78
+    },
+
+    // PHASE-0 — ANALYTICS CORE CONFIG
+    analytics: {
+      enabled: true,
+      endpoint: "https://script.google.com/macros/s/AKfycbzaK1ZzolfpQw6SvsWqioR5RYEiO_S6BXgnN3dyUDUAuXhJ81_byHT3PzplGI9yHYTMyQ/exec",
+      batchIntervalMs: 5000
     }
   };
+
+  // PHASE-0 — ANALYTICS CORE
+  // Anonymous session-only ID. No name, account, device ID or other personal data.
+  const Analytics = {
+    queue: [],
+    sessionId: null,
+    sessionStart: 0,
+    intervalId: null,
+    flushInFlight: false,
+    storageKey: "squishFallAnalyticsPending",
+    tutorialShownAt: 0,
+    totalPlayTimeMs: 0,
+    totalDeaths: 0,
+    bestScoreThisSession: 0,
+    lastSessionEndAt: 0,
+
+    init() {
+      if (!CONFIG.analytics.enabled) return;
+
+      let sessionId = sessionStorage.getItem("squishFallAnalyticsSessionId");
+      if (!sessionId) {
+        sessionId = `sf-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 8)}`;
+        sessionStorage.setItem("squishFallAnalyticsSessionId", sessionId);
+      }
+
+      this.sessionId = sessionId;
+      this.sessionStart = Date.now();
+      this.track("session_start");
+
+      // PHASE-2 — OFFLINE RESILIENCE
+      // flush() always tries persisted events before the current in-memory batch.
+      this.flush();
+      this.intervalId = setInterval(() => this.flush(), CONFIG.analytics.batchIntervalMs);
+    },
+
+    track(eventName, data = {}) {
+      if (!CONFIG.analytics.enabled || !this.sessionId) return;
+
+      this.queue.push({
+        event: eventName,
+        sessionId: this.sessionId,
+        t: Date.now() - this.sessionStart,
+        ...data
+      });
+    },
+
+    readPersisted() {
+      try {
+        const raw = localStorage.getItem(this.storageKey);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        return [];
+      }
+    },
+
+    writePersisted(events) {
+      try {
+        if (!events.length) {
+          localStorage.removeItem(this.storageKey);
+          return true;
+        }
+
+        // Keep storage bounded while preserving the newest useful telemetry.
+        localStorage.setItem(this.storageKey, JSON.stringify(events.slice(-500)));
+        return true;
+      } catch (_) {
+        return false;
+      }
+    },
+
+    appendPersisted(events) {
+      if (!events.length) return true;
+      const combined = this.readPersisted().concat(events);
+      return this.writePersisted(combined);
+    },
+
+    async postBatch(events) {
+      if (!events.length) return true;
+
+      const response = await fetch(CONFIG.analytics.endpoint, {
+        method: "POST",
+        body: JSON.stringify(events),
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
+        keepalive: true
+      });
+
+      if (!response.ok) {
+        throw new Error(`Analytics HTTP ${response.status}`);
+      }
+
+      return true;
+    },
+
+    async flush() {
+      if (!CONFIG.analytics.enabled || this.flushInFlight) return;
+      if (!CONFIG.analytics.endpoint) return;
+
+      this.flushInFlight = true;
+      try {
+        // PHASE-2 — send older offline events first.
+        const persisted = this.readPersisted();
+        if (persisted.length) {
+          try {
+            await this.postBatch(persisted);
+            this.writePersisted([]);
+          } catch (_) {
+            // Keep persisted data untouched; retry on the next interval/open.
+            return;
+          }
+        }
+
+        if (!this.queue.length) return;
+
+        const batch = this.queue.splice(0, this.queue.length);
+        try {
+          await this.postBatch(batch);
+        } catch (_) {
+          // If persistent backup itself fails, restore RAM queue instead of losing data.
+          if (!this.appendPersisted(batch)) {
+            this.queue.unshift(...batch);
+          }
+        }
+      } finally {
+        this.flushInFlight = false;
+      }
+    },
+
+    trackSessionEnd() {
+      if (!CONFIG.analytics.enabled || !this.sessionId) return;
+
+      // visibilitychange and beforeunload can fire back-to-back; avoid duplicates.
+      const now = Date.now();
+      if (now - this.lastSessionEndAt < 1000) return;
+      this.lastSessionEndAt = now;
+
+      this.bestScoreThisSession = Math.max(
+        this.bestScoreThisSession,
+        Math.round(STATE.score || 0)
+      );
+
+      this.track("session_end", {
+        totalPlayTimeMs: Math.round(this.totalPlayTimeMs),
+        totalDeaths: this.totalDeaths,
+        bestScoreThisSession: this.bestScoreThisSession
+      });
+
+      this.flush();
+
+      // If another batch is already in flight, synchronously persist any
+      // newly queued end-of-session snapshot so tab closure cannot drop it.
+      if (this.flushInFlight && this.queue.length) {
+        const closingBatch = this.queue.splice(0, this.queue.length);
+        if (!this.appendPersisted(closingBatch)) {
+          this.queue.unshift(...closingBatch);
+        }
+      }
+    }
+  };
+
+  // PHASE-3 — PRIVACY & PERFORMANCE
+  // Analytics never reads identity/device fields and never waits inside render/physics.
 
   const INPUT = {
     active: false,
@@ -1305,9 +1483,17 @@
       this.squashed = false;
       this.squashTimer = 0;
       this.contactCooldownUntil = 0;
-      this.squashDuration = 0.42;
+      this.squashDuration = 0.56;
       this.burnSeed = STATE.rng() * 1000;
       this.age = STATE.rng() * 3;
+
+      // Visual variety only — gameplay values remain untouched.
+      this.family = Math.floor(STATE.rng() * 9);
+      this.eyeVariant = Math.floor(STATE.rng() * 4);
+      this.mouthVariant = Math.floor(STATE.rng() * 4);
+      this.crestVariant = Math.floor(STATE.rng() * 4);
+      this.tentacleVariant = Math.floor(STATE.rng() * 3);
+      this.goreSeed = STATE.rng() * 1000;
     }
 
     update(dt) {
@@ -1853,6 +2039,11 @@
     playBtn.style.display = "block";
     document.getElementById("hud").style.display = "none";
     muteBtn.style.display = "none";
+    menuBtn.style.display = "none";
+
+    // PHASE-1 — tutorial is now actually visible to the player.
+    Analytics.tutorialShownAt = Date.now();
+    Analytics.track("tutorial_shown");
 
     AudioSys.resume().catch(() => {});
   }
@@ -1860,7 +2051,13 @@
   function beginActualRun() {
     if (STATE.mode !== MODE.TUTORIAL) return;
 
+    // PHASE-1 — tutorial completion + first real gameplay start.
+    Analytics.track("tutorial_completed", {
+      timeToTapMs: Math.max(0, Date.now() - Analytics.tutorialShownAt)
+    });
+
     STATE.mode = MODE.PLAYING;
+    Analytics.track("game_start");
     STATE.flickHintTimer = 5.2;
     PLAYER.vy = 80;
     PLAYER.prevY = PLAYER.y;
@@ -1881,6 +2078,25 @@
   function beginDeath(reason) {
     if (STATE.mode !== MODE.PLAYING) return;
     if (STATE.invincibleTimer > 0) return;
+
+    // PHASE-1 — death is captured before resetCombo() changes comboAtDeath.
+    const analyticsReason = /microbe/i.test(reason)
+      ? "MICROBE"
+      : /laser|spike/i.test(reason)
+        ? "SPIKE"
+        : "FALL";
+
+    Analytics.totalDeaths += 1;
+    Analytics.bestScoreThisSession = Math.max(
+      Analytics.bestScoreThisSession,
+      Math.round(STATE.score)
+    );
+    Analytics.track("death", {
+      reason: analyticsReason,
+      score: Math.round(STATE.score),
+      survivedMs: Math.round(STATE.time * 1000),
+      comboAtDeath: STATE.combo
+    });
 
     STATE.mode = MODE.DEATH;
     STATE.deathTimer = 0;
@@ -2039,6 +2255,7 @@
     if (STATE.mode !== MODE.REVIVE || STATE.reviveUsed) return;
 
     STATE.reviveUsed = true;
+    Analytics.track("revive_used");
     STATE.reviveTimer = 0;
     STATE.deathPieces.length = 0;
     finishWindEvent();
@@ -2079,6 +2296,7 @@
     reviveCountdown.textContent = "3";
     reviveBtn.style.display = "none";
     playBtn.style.display = "none";
+    menuBtn.style.display = "none";
     document.getElementById("hud").style.display = "none";
 
     AudioSys.resume().catch(() => {});
@@ -2136,6 +2354,7 @@
     reviveCountdown.style.display = "none";
     reviveBtn.style.display = "none";
     playBtn.style.display = "block";
+    menuBtn.style.display = "block";
 
     panelTitle.textContent = "RUN OVER";
     panelText.innerHTML =
@@ -2143,6 +2362,25 @@
       `Score: <b>${Math.floor(STATE.score)}</b><br>` +
       `Best: <b>${Math.floor(STATE.best)}</b>`;
     playBtn.textContent = "RUN AGAIN";
+    overlay.style.display = "grid";
+  }
+
+  function returnToMainMenu() {
+    if (STATE.mode !== MODE.GAMEOVER) return;
+
+    STATE.mode = MODE.MENU;
+    finishWindEvent();
+    MusicSys.stop();
+    document.getElementById("hud").style.display = "none";
+    muteBtn.style.display = "grid";
+
+    panelTitle.textContent = "SQUISH FALL";
+    panelText.innerHTML = `<b>Best: ${Math.floor(STATE.best)}</b>`;
+    reviveCountdown.style.display = "none";
+    reviveBtn.style.display = "none";
+    menuBtn.style.display = "none";
+    playBtn.style.display = "block";
+    playBtn.textContent = "PLAY";
     overlay.style.display = "grid";
   }
 
@@ -2506,7 +2744,7 @@
 
         p.impact = clamp(incomingSpeed / 760, 0.18, 0.72);
         p.bounceVel += clamp(incomingSpeed / 260, 1.2, 4.0);
-        p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 6.2;
+        p.wobbleVel += clamp((PLAYER.x - (p.x + p.w * 0.5)) / (p.w * 0.5), -1, 1) * 7.4;
 
         PLAYER.squash = clamp(incomingSpeed / 820, 0.14, 0.42);
         PLAYER.stretch = -0.04;
@@ -3012,6 +3250,8 @@
     }
 
     STATE.time += dt;
+    // PHASE-3 — one numeric addition only; no network work in the game loop.
+    if (CONFIG.analytics.enabled) Analytics.totalPlayTimeMs += dt * 1000;
     if (STATE.invincibleTimer > 0) {
       STATE.invincibleTimer = Math.max(0, STATE.invincibleTimer - dt);
     }
@@ -3155,9 +3395,9 @@
     for (const p of STATE.platforms) {
       if (p.broken) continue;
 
-      const visualSink = p.impact * 4.2;
-      const tilt = clamp(p.wobble * 0.09, -0.14, 0.14);
-      const bounceY = p.bounce * 2.5 + visualSink;
+      const visualSink = p.impact * 5.3;
+      const tilt = clamp(p.wobble * 0.135, -0.21, 0.21);
+      const bounceY = p.bounce * 3.6 + visualSink;
       const cx = p.x + p.w * 0.5;
       const cy = p.y + p.h * 0.5;
 
@@ -3236,7 +3476,7 @@
       if (p.type !== TYPE.SPIKE || p.broken) continue;
 
       const tilt = clamp(p.wobble * 0.09, -0.14, 0.14);
-      const bounceY = p.bounce * 2.2;
+      const bounceY = p.bounce * 2.6;
       const cx = p.x + p.w * 0.5;
       const cy = p.y + p.h * 0.5;
 
@@ -3333,75 +3573,108 @@
       const bob = dying ? 0 : Math.sin(phase) * 0.9;
       const lean = dying ? 0 : enemy.patrolDir * Math.sin(phase * 0.55) * 0.045;
 
-      // Green slime alien families.
-      const family = enemy.id % 5;
-      const body = ["#69a94f", "#78b85d", "#5d9f47", "#7caf55", "#67a85c"][family];
-      const bodyDark = ["#3d7036", "#4a7d3c", "#356a31", "#4c7437", "#3f7650"][family];
-      const slime = ["#8fd56f", "#9be57a", "#79c963", "#a0d96d", "#78c87a"][family];
-      const highlight = ["#b9ed9b", "#c9f4ac", "#a9e78f", "#d0f0a4", "#a6e5ac"][family];
+      const family = enemy.family ?? (enemy.id % 9);
+      const palettes = [
+        { body: "#69a94f", bodyDark: "#3d7036", slime: "#8fd56f", highlight: "#b9ed9b", accent: "#dff5b7" },
+        { body: "#78b85d", bodyDark: "#4a7d3c", slime: "#9be57a", highlight: "#c9f4ac", accent: "#f1ffd8" },
+        { body: "#5d9f47", bodyDark: "#356a31", slime: "#79c963", highlight: "#a9e78f", accent: "#d1f7bf" },
+        { body: "#7caf55", bodyDark: "#4c7437", slime: "#a0d96d", highlight: "#d0f0a4", accent: "#f0ffd1" },
+        { body: "#67a85c", bodyDark: "#3f7650", slime: "#78c87a", highlight: "#a6e5ac", accent: "#dbf6d6" },
+        { body: "#7eb14a", bodyDark: "#48692f", slime: "#a7da5b", highlight: "#d8f79f", accent: "#f6ffd4" },
+        { body: "#4ea26b", bodyDark: "#2f6d4d", slime: "#6ed79a", highlight: "#9af0c4", accent: "#d4ffe5" },
+        { body: "#86a94e", bodyDark: "#576f30", slime: "#b7d86d", highlight: "#dff0a3", accent: "#f4ffd7" },
+        { body: "#5ca178", bodyDark: "#335f49", slime: "#79d3ac", highlight: "#b2f0d2", accent: "#e3fff0" }
+      ];
+      const P = palettes[family];
+      const body = P.body;
+      const bodyDark = P.bodyDark;
+      const slime = P.slime;
+      const highlight = P.highlight;
+      const accent = P.accent;
       const outline = "#30402d";
+      const eyeWhite = enemy.eyeVariant === 3 ? "#f9f1ff" : "#f7f5dc";
 
       ctx.save();
       ctx.translate(enemy.x, enemy.y + bob);
       ctx.rotate(lean);
 
-      // Body should disintegrate into dust instead of visibly being squashed.
-      const bodyFade = dying ? Math.max(0, 1 - deathT * 6.0) : 1;
-      const dustT = dying ? clamp((deathT - 0.02) / 0.98, 0, 1) : 0;
+      const bodyFade = dying ? Math.max(0, 1 - deathT * 5.3) : 1;
+      const burstT = dying ? Math.pow(clamp(deathT, 0, 1), 0.82) : 0;
+      const mistFade = dying ? clamp(1 - deathT * 1.02, 0, 1) : 0;
 
-      if (dying) {
-        ctx.globalAlpha = bodyFade;
-      }
+      if (dying) ctx.globalAlpha = bodyFade;
 
       // Ground shadow
       ctx.globalAlpha *= 0.16;
       ctx.fillStyle = "#000";
       ctx.beginPath();
-      ctx.ellipse(0, r * 0.92, r * 0.62, r * 0.18, 0, 0, TAU);
+      ctx.ellipse(0, r * 0.95, r * 0.64, r * 0.18, 0, 0, TAU);
       ctx.fill();
       ctx.globalAlpha = bodyFade;
 
-      // Alien antennae / feelers
+      // Crest / dorsal spikes for extra silhouette variety.
+      if (enemy.crestVariant > 0) {
+        const spikeCount = 2 + enemy.crestVariant;
+        for (let i = 0; i < spikeCount; i++) {
+          const t = spikeCount === 1 ? 0.5 : i / (spikeCount - 1);
+          const x = lerp(-r * 0.42, r * 0.38, t);
+          const baseY = -r * (0.48 + (i % 2) * 0.05);
+          const h = r * (0.18 + enemy.crestVariant * 0.04 + (i % 2) * 0.05);
+          ctx.fillStyle = i % 2 === 0 ? bodyDark : slime;
+          ctx.strokeStyle = outline;
+          ctx.lineWidth = 1.3;
+          ctx.beginPath();
+          ctx.moveTo(x - 4, baseY + 3);
+          ctx.lineTo(x, baseY - h);
+          ctx.lineTo(x + 4, baseY + 3);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+
+      // Antennae / feelers
       ctx.strokeStyle = outline;
       ctx.lineWidth = 2;
       ctx.lineCap = "round";
 
-      const antennaCount = family === 2 ? 5 : family === 4 ? 6 : 4;
+      const antennaCount = 3 + (family % 4) + (enemy.crestVariant === 3 ? 1 : 0);
       for (let i = 0; i < antennaCount; i++) {
-        const a = -2.45 + (i / Math.max(1, antennaCount - 1)) * 1.75;
+        const spread = 1.55 + (enemy.tentacleVariant === 2 ? 0.18 : 0);
+        const a = -2.52 + (i / Math.max(1, antennaCount - 1)) * spread;
         const sx = Math.cos(a) * r * 0.55;
         const sy = Math.sin(a) * r * 0.52;
-        const ex = Math.cos(a) * r * (1.0 + (i % 2) * 0.12) + Math.sin(phase + i) * 1.2;
-        const ey = Math.sin(a) * r * (0.95 + (i % 3) * 0.05) - r * 0.08;
+        const ex = Math.cos(a) * r * (0.98 + (i % 2) * 0.14) + Math.sin(phase + i) * (1.0 + enemy.eyeVariant * 0.2);
+        const ey = Math.sin(a) * r * (0.95 + (i % 3) * 0.06) - r * 0.08;
 
         ctx.beginPath();
         ctx.moveTo(sx, sy);
         ctx.quadraticCurveTo(
           (sx + ex) * 0.52 + Math.sin(i + phase) * 2.0,
-          (sy + ey) * 0.5 - 3,
+          (sy + ey) * 0.5 - (2.5 + enemy.crestVariant * 0.4),
           ex,
           ey
         );
         ctx.stroke();
 
-        ctx.fillStyle = slime;
+        ctx.fillStyle = i % 2 === 0 ? slime : accent;
         ctx.beginPath();
-        ctx.arc(ex, ey, 2.0 + (i % 2) * 0.6, 0, TAU);
+        ctx.arc(ex, ey, 1.8 + (i % 2) * 0.7, 0, TAU);
         ctx.fill();
         ctx.stroke();
       }
 
       // Side tentacles
-      const tentacleSwing = Math.sin(phase) * 2.1;
+      const tentacleSwing = Math.sin(phase) * (1.6 + enemy.tentacleVariant * 0.5);
       ctx.strokeStyle = bodyDark;
-      ctx.lineWidth = 2.4;
+      ctx.lineWidth = 2.2 + enemy.tentacleVariant * 0.3;
 
       ctx.beginPath();
       ctx.moveTo(-r * 0.68, r * 0.02);
       ctx.quadraticCurveTo(
-        -r * 1.0,
+        -r * (0.98 + enemy.tentacleVariant * 0.05),
         r * 0.05 + tentacleSwing,
-        -r * 1.12,
+        -r * (1.08 + enemy.tentacleVariant * 0.06),
         r * 0.42 + tentacleSwing * 0.4
       );
       ctx.stroke();
@@ -3409,71 +3682,106 @@
       ctx.beginPath();
       ctx.moveTo(r * 0.68, r * 0.02);
       ctx.quadraticCurveTo(
-        r * 1.0,
+        r * (0.98 + enemy.tentacleVariant * 0.05),
         r * 0.05 - tentacleSwing,
-        r * 1.12,
+        r * (1.08 + enemy.tentacleVariant * 0.06),
         r * 0.42 - tentacleSwing * 0.4
       );
       ctx.stroke();
 
-      // Main gelatinous alien body
+      // Main body with more silhouette variety.
       ctx.fillStyle = body;
       ctx.strokeStyle = outline;
       ctx.lineWidth = 2.4;
       ctx.beginPath();
 
-      if (family === 1) {
-        ctx.moveTo(-r * 0.82, r * 0.12);
-        ctx.bezierCurveTo(-r * 0.88, -r * 0.55, -r * 0.44, -r * 0.88, 0, -r * 0.84);
-        ctx.bezierCurveTo(r * 0.58, -r * 0.90, r * 0.88, -r * 0.40, r * 0.82, r * 0.16);
-        ctx.bezierCurveTo(r * 0.75, r * 0.70, r * 0.32, r * 0.76, 0, r * 0.70);
-        ctx.bezierCurveTo(-r * 0.35, r * 0.78, -r * 0.78, r * 0.62, -r * 0.82, r * 0.12);
-      } else if (family === 3) {
-        ctx.ellipse(0, -r * 0.02, r * 0.78, r * 0.96, 0, 0, TAU);
-      } else {
-        ctx.ellipse(0, 0, r * 0.92, r * 0.82, 0, 0, TAU);
+      switch (family) {
+        case 1:
+          ctx.moveTo(-r * 0.82, r * 0.12);
+          ctx.bezierCurveTo(-r * 0.88, -r * 0.55, -r * 0.44, -r * 0.88, 0, -r * 0.84);
+          ctx.bezierCurveTo(r * 0.58, -r * 0.90, r * 0.88, -r * 0.40, r * 0.82, r * 0.16);
+          ctx.bezierCurveTo(r * 0.75, r * 0.70, r * 0.32, r * 0.76, 0, r * 0.70);
+          ctx.bezierCurveTo(-r * 0.35, r * 0.78, -r * 0.78, r * 0.62, -r * 0.82, r * 0.12);
+          break;
+        case 3:
+          ctx.ellipse(0, -r * 0.02, r * 0.78, r * 0.96, 0, 0, TAU);
+          break;
+        case 5:
+          ctx.moveTo(-r * 0.88, r * 0.04);
+          ctx.quadraticCurveTo(-r * 0.98, -r * 0.54, -r * 0.34, -r * 0.86);
+          ctx.quadraticCurveTo(r * 0.08, -r * 1.02, r * 0.44, -r * 0.72);
+          ctx.quadraticCurveTo(r * 0.98, -r * 0.28, r * 0.76, r * 0.34);
+          ctx.quadraticCurveTo(r * 0.54, r * 0.82, -r * 0.08, r * 0.76);
+          ctx.quadraticCurveTo(-r * 0.70, r * 0.70, -r * 0.88, r * 0.04);
+          break;
+        case 6:
+          ctx.moveTo(-r * 0.76, -r * 0.08);
+          ctx.bezierCurveTo(-r * 0.92, -r * 0.60, -r * 0.28, -r * 0.96, r * 0.16, -r * 0.80);
+          ctx.bezierCurveTo(r * 0.82, -r * 0.58, r * 0.98, r * 0.08, r * 0.72, r * 0.50);
+          ctx.bezierCurveTo(r * 0.32, r * 0.88, -r * 0.42, r * 0.88, -r * 0.76, r * 0.30);
+          break;
+        case 7:
+          ctx.ellipse(0, r * 0.04, r * 0.96, r * 0.72, -0.10, 0, TAU);
+          break;
+        case 8:
+          ctx.moveTo(-r * 0.90, r * 0.10);
+          ctx.quadraticCurveTo(-r * 0.70, -r * 0.88, 0, -r * 0.88);
+          ctx.quadraticCurveTo(r * 0.78, -r * 0.86, r * 0.92, r * 0.06);
+          ctx.quadraticCurveTo(r * 0.72, r * 0.90, 0, r * 0.72);
+          ctx.quadraticCurveTo(-r * 0.68, r * 0.86, -r * 0.90, r * 0.10);
+          break;
+        default:
+          ctx.ellipse(0, 0, r * 0.92, r * 0.82, 0, 0, TAU);
+          break;
       }
 
       ctx.fill();
       ctx.stroke();
 
-      // Slime surface highlights
-      ctx.globalAlpha *= 0.34;
+      // Highlight sheen
+      ctx.globalAlpha *= 0.32;
       ctx.fillStyle = highlight;
       ctx.beginPath();
       ctx.ellipse(-r * 0.30, -r * 0.38, r * 0.24, r * 0.12, -0.35, 0, TAU);
       ctx.fill();
+      if (enemy.crestVariant >= 2) {
+        ctx.beginPath();
+        ctx.ellipse(r * 0.18, -r * 0.24, r * 0.16, r * 0.07, 0.25, 0, TAU);
+        ctx.fill();
+      }
       ctx.globalAlpha = bodyFade;
 
-      // Bubbles / slime pustules
-      const bubbleCount = 5 + (family % 3);
+      // Slime pustules / bubbles
+      const bubbleCount = 4 + (family % 4) + enemy.crestVariant;
       for (let i = 0; i < bubbleCount; i++) {
-        const bx = Math.cos(i * 1.27 + enemy.id) * r * (0.20 + (i % 3) * 0.16);
-        const by = Math.sin(i * 1.47 + enemy.id * 0.4) * r * 0.25 + ((i % 2) ? 2 : -2);
-        const br = 1.8 + (i % 3) * 1.0;
+        const bx = Math.cos(i * 1.23 + enemy.id * 0.7) * r * (0.18 + (i % 3) * 0.17);
+        const by = Math.sin(i * 1.41 + enemy.id * 0.4) * r * 0.27 + ((i % 2) ? 2 : -2);
+        const br = 1.5 + (i % 3) * 1.0 + (enemy.eyeVariant === 2 ? 0.2 : 0);
 
-        ctx.fillStyle = bodyDark;
+        ctx.fillStyle = i % 3 === 0 ? slime : bodyDark;
         ctx.beginPath();
         ctx.arc(bx, by, br, 0, TAU);
         ctx.fill();
 
-        ctx.fillStyle = highlight;
-        ctx.globalAlpha *= 0.48;
+        ctx.fillStyle = accent;
+        ctx.globalAlpha *= 0.42;
         ctx.beginPath();
         ctx.arc(bx - br * 0.25, by - br * 0.25, br * 0.32, 0, TAU);
         ctx.fill();
         ctx.globalAlpha = bodyFade;
       }
 
-      // Eyes - asymmetrical alien look
-      const mainEyeX = family === 4 ? -r * 0.12 : r * 0.04;
-      const mainEyeY = -r * 0.08;
+      // Eyes
+      const mainEyeX = enemy.eyeVariant === 1 ? -r * 0.08 : enemy.eyeVariant === 2 ? r * 0.12 : r * 0.02;
+      const mainEyeY = enemy.eyeVariant === 3 ? -r * 0.13 : -r * 0.08;
+      const mainEyeRX = enemy.eyeVariant === 2 ? r * 0.28 : r * 0.34;
+      const mainEyeRY = enemy.eyeVariant === 3 ? r * 0.22 : r * 0.29;
 
-      ctx.fillStyle = "#f7f5dc";
+      ctx.fillStyle = eyeWhite;
       ctx.strokeStyle = outline;
       ctx.lineWidth = 1.7;
       ctx.beginPath();
-      ctx.ellipse(mainEyeX, mainEyeY, r * 0.34, r * 0.29, 0, 0, TAU);
+      ctx.ellipse(mainEyeX, mainEyeY, mainEyeRX, mainEyeRY, enemy.eyeVariant === 3 ? -0.16 : 0, 0, TAU);
       ctx.fill();
       ctx.stroke();
 
@@ -3482,7 +3790,7 @@
 
       ctx.fillStyle = "#182318";
       ctx.beginPath();
-      ctx.arc(mainEyeX + lookX, mainEyeY + lookY, r * 0.105, 0, TAU);
+      ctx.arc(mainEyeX + lookX, mainEyeY + lookY, r * 0.10, 0, TAU);
       ctx.fill();
 
       ctx.fillStyle = "#ffffff";
@@ -3490,13 +3798,13 @@
       ctx.arc(mainEyeX + lookX - r * 0.03, mainEyeY + lookY - r * 0.035, r * 0.025, 0, TAU);
       ctx.fill();
 
-      const extraEyes = family === 0 ? 2 : family === 2 ? 3 : 1;
+      const extraEyes = [1, 2, 3, 4][enemy.eyeVariant];
       for (let i = 0; i < extraEyes; i++) {
-        const ex = (-0.42 + i * 0.34) * r;
-        const ey = (-0.28 + (i % 2) * 0.14) * r;
-        const er = r * (0.085 + (i % 2) * 0.02);
+        const ex = (-0.46 + (i / Math.max(1, extraEyes - 1)) * 0.82) * r;
+        const ey = (-0.28 + (i % 2) * 0.15) * r + (enemy.eyeVariant === 3 ? r * 0.05 : 0);
+        const er = r * (0.075 + (i % 2) * 0.02);
 
-        ctx.fillStyle = "#f7f5dc";
+        ctx.fillStyle = eyeWhite;
         ctx.beginPath();
         ctx.arc(ex, ey, er, 0, TAU);
         ctx.fill();
@@ -3508,61 +3816,78 @@
         ctx.fill();
       }
 
-      // Angry brow
+      // Brow / menace lines
       ctx.strokeStyle = outline;
-      ctx.lineWidth = 2.2;
+      ctx.lineWidth = 2.1;
       ctx.beginPath();
-      ctx.moveTo(mainEyeX - r * 0.28, mainEyeY - r * 0.25);
+      ctx.moveTo(mainEyeX - r * 0.30, mainEyeY - r * 0.25);
       ctx.quadraticCurveTo(
         mainEyeX,
-        mainEyeY - r * 0.34,
+        mainEyeY - r * (0.34 + enemy.mouthVariant * 0.02),
         mainEyeX + r * 0.25,
         mainEyeY - r * 0.22
       );
       ctx.stroke();
 
-      // Alien mouth
+      // Mouth variants
       ctx.fillStyle = "#263226";
       ctx.strokeStyle = outline;
       ctx.lineWidth = 1.6;
       ctx.beginPath();
-      ctx.ellipse(0, r * 0.26, r * 0.28, r * 0.18, 0, 0, TAU);
+      if (enemy.mouthVariant === 0) {
+        ctx.ellipse(0, r * 0.26, r * 0.28, r * 0.18, 0, 0, TAU);
+      } else if (enemy.mouthVariant === 1) {
+        ctx.moveTo(-r * 0.26, r * 0.18);
+        ctx.quadraticCurveTo(0, r * 0.44, r * 0.28, r * 0.20);
+        ctx.quadraticCurveTo(0, r * 0.33, -r * 0.26, r * 0.18);
+      } else if (enemy.mouthVariant === 2) {
+        ctx.ellipse(0, r * 0.29, r * 0.22, r * 0.22, 0, 0, TAU);
+      } else {
+        ctx.moveTo(-r * 0.28, r * 0.20);
+        ctx.lineTo(-r * 0.08, r * 0.36);
+        ctx.lineTo(r * 0.12, r * 0.18);
+        ctx.lineTo(r * 0.28, r * 0.34);
+        ctx.quadraticCurveTo(0, r * 0.46, -r * 0.28, r * 0.20);
+      }
       ctx.fill();
       ctx.stroke();
 
-      // Small uneven teeth
-      ctx.fillStyle = "#e9edcf";
-      for (let i = 0; i < 4; i++) {
-        const tx = (-0.20 + i * 0.13) * r;
+      // Teeth
+      ctx.fillStyle = enemy.mouthVariant === 2 ? accent : "#e9edcf";
+      const toothCount = 3 + enemy.mouthVariant;
+      for (let i = 0; i < toothCount; i++) {
+        const tx = (-0.22 + (i / Math.max(1, toothCount - 1)) * 0.40) * r;
+        const toothTop = enemy.mouthVariant === 2 ? r * 0.14 : r * 0.17;
+        const toothBottom = enemy.mouthVariant === 2 ? r * 0.32 : r * 0.29;
         ctx.beginPath();
-        ctx.moveTo(tx, r * 0.17);
-        ctx.lineTo(tx + r * 0.045, r * 0.29);
-        ctx.lineTo(tx + r * 0.09, r * 0.17);
+        ctx.moveTo(tx, toothTop);
+        ctx.lineTo(tx + r * (0.03 + (i % 2) * 0.01), toothBottom);
+        ctx.lineTo(tx + r * 0.08, toothTop);
         ctx.closePath();
         ctx.fill();
       }
 
-      // Slime drool
+      // Drool / slime thread
       ctx.strokeStyle = slime;
       ctx.lineWidth = 2.2;
       ctx.beginPath();
-      ctx.moveTo(r * 0.08, r * 0.37);
-      ctx.lineTo(r * 0.12, r * 0.58);
+      ctx.moveTo(r * (enemy.mouthVariant === 1 ? -0.10 : 0.08), r * 0.37);
+      ctx.lineTo(r * (enemy.mouthVariant === 1 ? -0.12 : 0.12), r * (0.58 + enemy.mouthVariant * 0.03));
       ctx.stroke();
 
-      ctx.fillStyle = slime;
+      ctx.fillStyle = accent;
       ctx.beginPath();
-      ctx.arc(r * 0.13, r * 0.62, 2.4, 0, TAU);
+      ctx.arc(r * (enemy.mouthVariant === 1 ? -0.11 : 0.13), r * (0.62 + enemy.mouthVariant * 0.03), 2.1 + enemy.tentacleVariant * 0.2, 0, TAU);
       ctx.fill();
 
       // Sticky feet / drips attached to platform
       ctx.strokeStyle = bodyDark;
       ctx.lineWidth = 1.9;
-      const footCount = 5;
+      const footCount = 4 + enemy.tentacleVariant + (family % 2);
       for (let i = 0; i < footCount; i++) {
-        const fx = (-0.70 + i / 4 * 1.40) * r;
+        const fx = (-0.70 + i / Math.max(1, footCount - 1) * 1.40) * r;
         const fy = r * 0.72;
-        const h = r * (0.16 + (i % 2) * 0.05);
+        const h = r * (0.15 + (i % 2) * 0.05 + enemy.tentacleVariant * 0.01);
 
         ctx.beginPath();
         ctx.moveTo(fx - 2, fy);
@@ -3572,70 +3897,133 @@
         if (i % 2 === 0) {
           ctx.fillStyle = slime;
           ctx.beginPath();
-          ctx.arc(fx + 1.5, fy + h + 1, 1.6, 0, TAU);
+          ctx.arc(fx + 1.5, fy + h + 1, 1.5 + (i % 3) * 0.15, 0, TAU);
           ctx.fill();
         }
       }
 
-      // True dust death: the alien quickly vanishes into powder and slime mist.
+      // More brutal fragment-style death burst.
       if (dying) {
-        const fade = clamp(1 - dustT * 1.06, 0, 1);
+        const fade = mistFade;
 
-        // Dense powder burst at the stomp point
-        for (let i = 0; i < 34; i++) {
-          const a = enemy.burnSeed * 0.009 + i * 0.43;
-          const spread = dustT * (r * 1.02 + (i % 6) * 1.9);
+        // Big body chunks
+        for (let i = 0; i < 12; i++) {
+          const a = enemy.goreSeed * 0.01 + i * 0.55;
+          const dist = burstT * (r * 0.72 + (i % 4) * 3.7 + i * 0.55);
+          const px = Math.cos(a) * dist;
+          const py = r * 0.10 + Math.sin(a) * dist * 0.38 - burstT * (4.0 + (i % 3) * 1.7);
+          const rot = a * 2.1 + burstT * (2.0 + (i % 3));
+          const chunkR = 3.6 + (i % 3) * 1.8;
+
+          ctx.save();
+          ctx.globalAlpha = fade * (0.22 + (i % 3) * 0.08);
+          ctx.translate(px, py);
+          ctx.rotate(rot);
+          ctx.fillStyle = i % 4 === 0 ? slime : i % 2 === 0 ? body : bodyDark;
+          ctx.strokeStyle = outline;
+          ctx.lineWidth = 1.1;
+          ctx.beginPath();
+          for (let j = 0; j < 5; j++) {
+            const pa = -Math.PI / 2 + j * (TAU / 5);
+            const rr = chunkR * (0.68 + ((i + j) % 3) * 0.20);
+            const vx = Math.cos(pa) * rr;
+            const vy = Math.sin(pa) * rr;
+            if (j === 0) ctx.moveTo(vx, vy);
+            else ctx.lineTo(vx, vy);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          if (i % 3 === 0) {
+            ctx.fillStyle = accent;
+            ctx.beginPath();
+            ctx.arc(-chunkR * 0.12, -chunkR * 0.16, chunkR * 0.24, 0, TAU);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+
+        // Eye and tooth shards
+        for (let i = 0; i < 9; i++) {
+          const a = enemy.goreSeed * 0.017 + i * 0.67;
+          const dist = burstT * (r * 0.44 + i * 1.8);
+          const px = Math.cos(a) * dist;
+          const py = -r * 0.02 + Math.sin(a) * dist * 0.30 - burstT * (2.8 + (i % 2) * 1.1);
+          ctx.save();
+          ctx.globalAlpha = fade * (0.20 + (i % 2) * 0.08);
+          ctx.translate(px, py);
+          ctx.rotate(a * 3.2 + burstT * 6.5);
+          ctx.fillStyle = i % 3 === 0 ? eyeWhite : "#e9edcf";
+          ctx.beginPath();
+          ctx.moveTo(-2.2, -1.6);
+          ctx.lineTo(2.3, -0.8);
+          ctx.lineTo(1.1, 2.1);
+          ctx.lineTo(-2.5, 1.2);
+          ctx.closePath();
+          ctx.fill();
+          if (i % 3 === 0) {
+            ctx.fillStyle = "#1a2618";
+            ctx.beginPath();
+            ctx.arc(0.2, 0.1, 0.8, 0, TAU);
+            ctx.fill();
+          }
+          ctx.restore();
+        }
+
+        // Dense dust and slime mist
+        for (let i = 0; i < 38; i++) {
+          const a = enemy.burnSeed * 0.011 + i * 0.39;
+          const spread = burstT * (r * 1.0 + (i % 6) * 2.2);
           const px = Math.cos(a) * spread;
-          const py = r * 0.18 + Math.sin(a) * spread * 0.26 - dustT * (1.2 + (i % 4) * 0.55);
+          const py = r * 0.16 + Math.sin(a) * spread * 0.28 - burstT * (1.4 + (i % 4) * 0.55);
 
-          ctx.globalAlpha = fade * (0.11 + (i % 4) * 0.03);
+          ctx.globalAlpha = fade * (0.10 + (i % 4) * 0.03);
           ctx.fillStyle = i % 2 ? "#7f8a72" : "#a0ab8a";
           ctx.beginPath();
-          ctx.arc(px, py, 1.0 + (i % 4) * 0.38 + dustT * 0.58, 0, TAU);
+          ctx.arc(px, py, 1.0 + (i % 4) * 0.38 + burstT * 0.54, 0, TAU);
           ctx.fill();
         }
 
-        // Green slime powder / mist grains
-        for (let i = 0; i < 24; i++) {
+        for (let i = 0; i < 28; i++) {
           const a = enemy.burnSeed * 0.015 + i * 0.57;
-          const spread = dustT * (r * 0.92 + (i % 5) * 1.8);
+          const spread = burstT * (r * 0.92 + (i % 5) * 1.9);
           const px = Math.cos(a) * spread;
-          const py = Math.sin(a) * spread * 0.34 + r * 0.10 - dustT * (1.9 + (i % 3) * 0.7);
+          const py = Math.sin(a) * spread * 0.34 + r * 0.10 - burstT * (2.0 + (i % 3) * 0.8);
 
-          ctx.globalAlpha = fade * 0.25;
+          ctx.globalAlpha = fade * 0.23;
           ctx.fillStyle = i % 2 ? slime : highlight;
           ctx.beginPath();
-          ctx.arc(px, py, 0.8 + (i % 3) * 0.32, 0, TAU);
+          ctx.arc(px, py, 0.9 + (i % 3) * 0.34, 0, TAU);
           ctx.fill();
         }
 
-        // A soft slime haze right where the body used to be
-        ctx.globalAlpha = fade * 0.14;
+        // Slime smear where the stomp landed.
+        ctx.globalAlpha = fade * 0.16;
         ctx.fillStyle = body;
         ctx.beginPath();
         ctx.ellipse(
           0,
-          r * 0.20,
-          r * (0.46 + dustT * 0.42),
-          r * (0.18 + dustT * 0.08),
+          r * 0.24,
+          r * (0.50 + burstT * 0.48),
+          r * (0.16 + burstT * 0.10),
           0,
           0,
           TAU
         );
         ctx.fill();
 
-        // Impact dust ring
-        if (dustT < 0.34) {
-          const ringT = dustT / 0.34;
-          ctx.globalAlpha = (1 - ringT) * 0.22;
-          ctx.strokeStyle = "#a8b08f";
-          ctx.lineWidth = 2;
+        // Shock ring
+        if (burstT < 0.42) {
+          const ringT = burstT / 0.42;
+          ctx.globalAlpha = (1 - ringT) * 0.24;
+          ctx.strokeStyle = accent;
+          ctx.lineWidth = 2.1;
           ctx.beginPath();
           ctx.ellipse(
             0,
             r * 0.28,
-            r * (0.44 + ringT * 0.96),
-            r * (0.11 + ringT * 0.26),
+            r * (0.40 + ringT * 1.12),
+            r * (0.10 + ringT * 0.28),
             0,
             0,
             TAU
@@ -4711,9 +5099,6 @@
     const y = H * 0.22;
 
     // Standalone down-arrow icon removed; animation teaches the gesture.
-    ctx.font = "900 13px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
-    ctx.fillText("STOMP BONUS", x, y + 20);
-
     ctx.font = "900 10px Comic Sans MS, Comic Sans, Chalkboard SE, Marker Felt, Segoe Print, cursive";
     ctx.globalAlpha = a * 0.58;
     ctx.fillText(IS_MOBILE ? "QUICK DOWN SWIPE" : "USE STOMP", x, y + 38);
@@ -4723,6 +5108,12 @@
 
   function render() {
     ctx.clearRect(0, 0, W, H);
+
+    // Keep shake from exposing the canvas' light CSS background on dark themes.
+    // This base fill is outside the translated scene, so screen edges always
+    // match the active theme even while impact/death shake is running.
+    ctx.fillStyle = mixedTheme().bg;
+    ctx.fillRect(0, 0, W, H);
 
     // Interpolate fixed-step physics for buttery-smooth rendering.
     // Physics values are restored immediately after drawing.
@@ -5017,6 +5408,11 @@
       finishWindEvent();
     }
 
+    // PHASE-1 — best-effort session end snapshot when the tab/app is hidden.
+    if (document.hidden) {
+      Analytics.trackSessionEnd();
+    }
+
     if (
       document.visibilityState === "visible" &&
       STATE.mode === MODE.PLAYING
@@ -5029,7 +5425,23 @@
     }
   });
 
-  playBtn.addEventListener("click", startGame);
+  window.addEventListener("beforeunload", () => {
+    Analytics.trackSessionEnd();
+  });
+
+  playBtn.addEventListener("click", () => {
+    if (STATE.mode === MODE.GAMEOVER) {
+      Analytics.track("retry_clicked");
+    }
+    startGame();
+  });
+
+  menuBtn.addEventListener("click", () => {
+    if (STATE.mode !== MODE.GAMEOVER) return;
+    Analytics.track("menu_clicked");
+    returnToMainMenu();
+  });
+
   reviveBtn.addEventListener("click", () => {
     // Placeholder ad-continue hook: connect your ad SDK here before performRevive().
     performRevive();
@@ -5065,6 +5477,9 @@
 
   refreshMuteButton();
   muteBtn.style.display = "grid";
+
+  // PHASE-1 — one session_start per page lifecycle; PHASE-2 retries old offline data first.
+  Analytics.init();
 
   // Initial draw
   document.getElementById("hud").style.display = "none";
