@@ -631,6 +631,11 @@
       mobileSwipeVelocity: 260,
       mobileAccumTravel: 16,
 
+      // Mobile stomp has a hard travel gate: tiny downward thumb movement
+      // while steering can never trigger a stomp. The finger must first move
+      // this far below its original touch point.
+      mobileFlickRequiredTravel: 48,
+
       // Mobile flick must be clearly downward, not just horizontal drag jitter.
       mobileDirectionRatio: 0.78
     },
@@ -3057,6 +3062,13 @@
     const cooldownReady =
       now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs;
 
+    // Hard mobile travel gate: measured from the original finger-down point,
+    // not from the short rolling velocity sample window.
+    const totalDownFromTouch = clientY - INPUT.flickStartY;
+    const mobileTravelReady =
+      !IS_MOBILE ||
+      totalDownFromTouch >= CONFIG.controls.mobileFlickRequiredTravel;
+
     // Key mobile safeguard:
     // downward travel must be strong compared with horizontal travel.
     // Normal left/right drag with a little vertical thumb wobble won't stomp.
@@ -3090,6 +3102,7 @@
 
     if (
       cooldownReady &&
+      mobileTravelReady &&
       !INPUT.flickTriggeredForPointer &&
       (classicFlick || smoothMobileFlick || intentFlick)
     ) {
@@ -5345,8 +5358,8 @@
 
       if (
         downwardDominant &&
-        dy >= 18 &&
-        dtMs <= 360 &&
+        dy >= CONFIG.controls.mobileFlickRequiredTravel &&
+        dtMs <= 420 &&
         now - INPUT.lastFlickAt >= CONFIG.controls.flickCooldownMs
       ) {
         INPUT.flickTriggeredForPointer = true;
